@@ -84,7 +84,7 @@ Set `MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX` on the Node server to
 dialog. Public release service names must start with `marimo-public-`.
 Deploy the reviewed release first and verify its URL opens signed out.
 Then open **Share app → App links → Publish**, enter that release URL,
-and copy the existing app link. **Make link private** disables the hub
+and copy the existing app link. **Disconnect public release** disables the hub
 redirect. Remove the release's public Invoker binding to withdraw its
 direct Cloud Run link too.
 

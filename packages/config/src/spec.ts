@@ -1751,6 +1751,21 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						default: './public',
 					},
 					{
+						id: 'MARIMOHUB_PUBLIC_APP_RELEASES',
+						name: 'Public app releases',
+						description:
+							'JSON map from an app slug to its registration ID and public release origin.',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX',
+						name: 'Public release host suffix',
+						description:
+							'Cloud Run suffix for release URLs connected through the app link dialog. Release service names start with `marimo-public-`.',
+						example: '-123456789.us-west1.run.app',
+						optIn: true,
+					},
+					{
 						id: 'MARIMOHUB_RUN_MAINTENANCE',
 						name: 'Run maintenance',
 						description:

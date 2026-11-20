@@ -4774,6 +4774,10 @@ components:
               required:
                 - mode
               additionalProperties: false
+            public_origin:
+              anyOf:
+                - type: string
+                - type: 'null'
             created_by:
               type: string
             created_at:

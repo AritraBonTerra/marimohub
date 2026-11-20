@@ -495,6 +495,8 @@ Server-wide settings; no backend selector.
 | `MARIMOHUB_APP_BASE_URL` | Public URL for browser links and the Node SPA base path. When the app uses a path prefix, set this variable. If unset, links use the request origin and the SPA uses `/`. | — | — | `https://hub.example.com/marimohub` |
 | `MARIMOHUB_PROJECT_NOTEBOOK_TARGET` | Notebook links in project lists and galleries open `notebook` or `app`. Users without app permission open the notebook page. In `app` mode, editors also see an Edit link. | — | `notebook` | `app` |
 | `MARIMOHUB_STATIC_ROOT` | Directory containing the web UI's static files. | — | `./public` | — |
+| `MARIMOHUB_PUBLIC_APP_RELEASES` | JSON map from an app slug to its registration ID and public release origin. | — | — | — |
+| `MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX` | Cloud Run suffix for release URLs connected through the app link dialog. Release service names start with `marimo-public-`. | — | — | `-123456789.us-west1.run.app` |
 | `MARIMOHUB_RUN_MAINTENANCE` | Run background maintenance (expiring old sessions, cleaning up sandboxes) on this replica only. | — | `false` | `true` |
 | `MARIMOHUB_SHUTDOWN_TIMEOUT_SECONDS` | Shutdown drain budget (1–86400 seconds): 180 for API replicas, 120 for maintenance. Set the termination grace at least 20 seconds longer. | — | — | `120` |
 | `MARIMOHUB_MAX_SESSIONS_PER_USER` | Per-user concurrent session cap (`0` = unlimited). Counts `edit` sessions, and separately bounds the apps a single user may have started — the cost ceiling a user cannot escape by fanning apps out across projects (apps are also capped per project via `MARIMOHUB_MAX_APPS_PER_PROJECT`). | — | `10` | — |

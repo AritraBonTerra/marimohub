@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from 'hono';
+import { ConfigError } from '@marimo-hub/config';
 import { z } from 'zod';
 import { isApprovedPublicAppOrigin, NotFoundError } from '@marimo-hub/core';
 import { DeepLinkSlugSchema } from '@marimo-hub/core/deep-link-slug';
@@ -17,8 +18,10 @@ export function parsePublicAppReleases(value?: string) {
 	if (value === undefined) return new Map<string, z.infer<typeof PublicReleaseSchema>>();
 	try {
 		return new Map(Object.entries(PublicReleasesSchema.parse(JSON.parse(value))));
-	} catch (cause) {
-		throw new Error('Invalid MARIMOHUB_PUBLIC_APP_RELEASES', { cause });
+	} catch {
+		throw new ConfigError('Invalid MARIMOHUB_PUBLIC_APP_RELEASES', {
+			variable: 'MARIMOHUB_PUBLIC_APP_RELEASES',
+		});
 	}
 }
 

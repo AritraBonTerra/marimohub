@@ -134,7 +134,7 @@ describe('AppLinksDialog', () => {
 		);
 		await user.click(screen.getByRole('button', { name: 'Publish link' }));
 		await user.click(await screen.findByRole('button', { name: 'Manage publication' }));
-		await user.click(screen.getByRole('button', { name: 'Make link private' }));
+		await user.click(screen.getByRole('button', { name: 'Disconnect public release' }));
 		await screen.findByRole('button', { name: 'Publish' });
 		expect(
 			fetch.mock.calls

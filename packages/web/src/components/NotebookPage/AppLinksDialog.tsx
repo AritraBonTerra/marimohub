@@ -137,7 +137,7 @@ export function AppLinksDialog({
 						<TextField label="Public release URL" value={origin} onChange={setOrigin} />
 						<p className="text-xs text-muted-foreground">
 							Enter the URL of your deployed, read-only release. Anyone with this app link can open
-							it.
+							it. The direct release URL stays public until access is removed in Cloud Run.
 						</p>
 						{publication.isError && (
 							<p role="alert" className="text-sm text-destructive">
@@ -163,13 +163,13 @@ export function AppLinksDialog({
 											{
 												onSuccess: () => {
 													setSelected(null);
-													toast.success('App link is private');
+													toast.success('Public release disconnected');
 												},
 											},
 										)
 									}
 								>
-									Make link private
+									Disconnect public release
 								</Button>
 							)}
 							<Button
