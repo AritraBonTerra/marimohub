@@ -879,6 +879,13 @@
 						"repeatable": false
 					},
 					{
+						"name": "publication",
+						"cli_name": "publication",
+						"required": false,
+						"value_type": "object",
+						"repeatable": false
+					},
+					{
 						"name": "slug",
 						"cli_name": "slug",
 						"required": true,

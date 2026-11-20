@@ -79,6 +79,17 @@ pass against the new lockfile.
 
 ## Share through the hub
 
+Set `MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX` on the Node server to
+`-PROJECT_NUMBER.REGION.run.app` to enable publishing from the app link
+dialog. Public release service names must start with `marimo-public-`.
+Deploy the reviewed release first and verify its URL opens signed out.
+Then open **Share app → App links → Publish**, enter that release URL,
+and copy the existing app link. **Make link private** disables the hub
+redirect. Remove the release's public Invoker binding to withdraw its
+direct Cloud Run link too.
+
+### Configure links through the environment
+
 Create an app link in the notebook’s **Share app → App links** dialog. Use the
 authenticated notebook deep-links API to find that link’s `registration_id`.
 After deploying the reviewed release, set `MARIMOHUB_PUBLIC_APP_RELEASES` on

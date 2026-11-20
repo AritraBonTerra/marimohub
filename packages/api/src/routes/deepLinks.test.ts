@@ -55,6 +55,44 @@ describe('App link routes', () => {
 		});
 	});
 
+	it('publishes only an authorized registration on the configured release host', async () => {
+		const link = await createLink();
+		const configured = createTestApi({
+			bucket: api.bucket,
+			deps: { publicAppReleaseHostSuffix: '-123.us-west1.run.app' },
+		});
+		const origin = 'https://marimo-public-sales-123.us-west1.run.app';
+		const body = {
+			slug: link.slug,
+			publication: { registration_id: link.registration_id, origin },
+		};
+		await expectError(await api.request('POST', base, body), 422);
+		const outsider = createTestApi({ bucket: api.bucket, userId: uid('outsider') });
+		await expectError(await outsider.request('POST', base, body), 403);
+		await expectError(
+			await configured.request('POST', base, {
+				...body,
+				publication: { ...body.publication, registration_id: '01J00000000000000000000000' },
+			}),
+			404,
+		);
+		expect(await expectOk(await configured.request('POST', base, body))).toMatchObject({
+			registration_id: link.registration_id,
+			public_origin: origin,
+		});
+		expect(await expectOk(await api.request('GET', base))).toMatchObject([
+			{ public_origin: origin },
+		]);
+		expect(
+			await expectOk(
+				await configured.request('POST', base, {
+					...body,
+					publication: { ...body.publication, origin: null },
+				}),
+			),
+		).toMatchObject({ public_origin: null });
+	});
+
 	it.each([
 		['team/overview', 'team%2Foverview'],
 		['team/overview', 'team/overview'],

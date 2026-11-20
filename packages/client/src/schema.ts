@@ -4360,6 +4360,7 @@ export interface components {
 				/** @enum {string} */
 				mode: 'inherit';
 			};
+			public_origin?: string | null;
 			created_by: string;
 			/** Format: date-time */
 			created_at: string;
@@ -14293,6 +14294,7 @@ export interface operations {
 								/** @enum {string} */
 								mode: 'inherit';
 							};
+							public_origin?: string | null;
 							created_by: string;
 							/** Format: date-time */
 							created_at: string;
@@ -14609,6 +14611,11 @@ export interface operations {
 					access?: {
 						/** @enum {string} */
 						mode: 'inherit';
+					};
+					publication?: {
+						/** Format: ulid */
+						registration_id: string;
+						origin: string | null;
 					};
 				};
 			};

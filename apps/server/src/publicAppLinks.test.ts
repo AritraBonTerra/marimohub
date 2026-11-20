@@ -60,3 +60,19 @@ describe('public app links', () => {
 		},
 	);
 });
+
+it('redirects a published origin on the approved host and stops after unpublishing', async () => {
+	const approved = 'https://marimo-public-sales-123.us-west1.run.app';
+	const resolve = vi.fn().mockResolvedValue({ ...link, public_origin: approved });
+	const app = new Hono();
+	app.use('/app/*', redirectPublicAppLinks(new Map(), { resolve }, '-123.us-west1.run.app'));
+	app.get('*', (c) => c.text('sign in'));
+	expect((await app.request('/app/sales/week')).headers.get('location')).toBe(approved);
+	resolve.mockResolvedValue({ ...link, public_origin: null });
+	expect(await (await app.request('/app/sales/week')).text()).toBe('sign in');
+	resolve.mockResolvedValue({
+		...link,
+		public_origin: 'https://marimo-public-sales-456.us-west1.run.app',
+	});
+	expect(await (await app.request('/app/sales/week')).text()).toBe('sign in');
+});

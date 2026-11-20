@@ -3320,6 +3320,10 @@ components:
           required:
             - mode
           additionalProperties: false
+        public_origin:
+          type:
+            - string
+            - 'null'
         created_by:
           type: string
         created_at:
@@ -15471,6 +15475,10 @@ paths:
                         required:
                           - mode
                         additionalProperties: false
+                      public_origin:
+                        type:
+                          - string
+                          - 'null'
                       created_by:
                         type: string
                       created_at:
@@ -15808,6 +15816,19 @@ paths:
                   required:
                     - mode
                   additionalProperties: false
+                publication:
+                  type: object
+                  properties:
+                    registration_id:
+                      type: string
+                      format: ulid
+                    origin:
+                      type:
+                        - string
+                        - 'null'
+                  required:
+                    - registration_id
+                    - origin
               required:
                 - slug
               additionalProperties: false

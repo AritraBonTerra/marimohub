@@ -24,6 +24,10 @@ export const ServerEnvSchema = z.looseObject({
 	PORT: port.optional(),
 	MARIMOHUB_BIND_HOST: bindHost.optional(),
 	MARIMOHUB_APP_BASE_URL: appBaseUrl.optional(),
+	MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX: z
+		.string()
+		.regex(/^-[0-9]+\.[a-z][a-z0-9-]*\.run\.app$/, 'expected -PROJECT_NUMBER.REGION.run.app')
+		.optional(),
 	MARIMOHUB_STATIC_ROOT: z
 		.string()
 		.refine((value) => value.trim().length > 0, 'expected a non-empty path')

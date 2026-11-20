@@ -105,6 +105,7 @@ export async function bootstrap(
 			await deps.storageLifecycle?.close();
 			throw error;
 		}
+		deps.publicAppReleaseHostSuffix = validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX;
 		await prepareDeps?.(deps);
 	} catch (err) {
 		if (isConfigError(err)) {
@@ -201,8 +202,15 @@ export async function bootstrap(
 	// Serve the prebuilt SPA. API routes (registered inside createApi) are terminal,
 	// so they take precedence; everything else falls through to static assets, with
 	// a single-page-app fallback to index.html.
-	if (publicAppReleases.size > 0) {
-		app.use('/app/*', redirectPublicAppLinks(publicAppReleases, deps.services.deepLinks));
+	if (publicAppReleases.size > 0 || deps.publicAppReleaseHostSuffix) {
+		app.use(
+			'/app/*',
+			redirectPublicAppLinks(
+				publicAppReleases,
+				deps.services.deepLinks,
+				deps.publicAppReleaseHostSuffix,
+			),
+		);
 	}
 	const spaFallback = serveSpaFallback(staticRoot, validatedEnv.MARIMOHUB_APP_BASE_URL);
 	app.get('/', spaFallback);

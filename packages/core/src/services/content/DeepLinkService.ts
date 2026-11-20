@@ -152,6 +152,31 @@ export class DeepLinkService {
 		return link;
 	}
 
+	async setPublicOrigin(
+		slug: string,
+		target: DeepLinkTarget,
+		registrationId: string,
+		origin: string | null,
+	): Promise<DeepLink> {
+		this.slug(slug);
+		return withCasRetry(this.bucket, async (cas) => {
+			const current = await this.read(slug);
+			if (
+				!current ||
+				'released' in current.record ||
+				current.record.registration_id !== registrationId ||
+				!sameTarget(current.record.target, target)
+			) {
+				throw new NotFoundError('App link not found');
+			}
+			const updated = { ...current.record, public_origin: origin };
+			await cas.put(paths.deepLink(slug), JSON.stringify(updated), {
+				onlyIfEtagMatches: current.etag,
+			});
+			return updated;
+		});
+	}
+
 	async release(slug: string, target: DeepLinkTarget, registrationId: string): Promise<void> {
 		await withCasRetry(this.bucket, async (cas) => {
 			const current = await this.read(slug);

@@ -35,6 +35,9 @@ export function AppLinksDialog({
 	const release = useReleaseDeepLink(projectId, notebookId);
 	const { copy } = useCopyToClipboard();
 	const [slug, setSlug] = useState('');
+	const [selected, setSelected] = useState<{ slug: string; registration_id: string } | null>(null);
+	const [origin, setOrigin] = useState('');
+	const publication = useRegisterDeepLink(projectId, notebookId);
 	const canonicalSlug = slug.trim().toLowerCase();
 	const valid = DeepLinkSlugSchema.safeParse(canonicalSlug).success;
 	const pending = register.isPending || release.isPending;
@@ -82,6 +85,19 @@ export function AppLinksDialog({
 								<Copy className="size-4" />
 							</IconButton>
 							{canManage && (
+								<Button
+									variant="ghost"
+									isDisabled={publication.isPending}
+									onPress={() => {
+										publication.reset();
+										setSelected(link);
+										setOrigin(link.public_origin ?? '');
+									}}
+								>
+									{link.public_origin ? 'Manage publication' : 'Publish'}
+								</Button>
+							)}
+							{canManage && (
 								<IconButton
 									label={`Remove ${link.slug}`}
 									isDisabled={pending}
@@ -95,6 +111,77 @@ export function AppLinksDialog({
 						</li>
 					))}
 				</ul>
+				{canManage && selected && (
+					<form
+						className="flex flex-col gap-2 rounded-md border p-3"
+						onSubmit={(event) => {
+							event.preventDefault();
+							if (!origin.trim() || publication.isPending) return;
+							publication.mutate(
+								{
+									slug: selected.slug,
+									publication: {
+										registration_id: selected.registration_id,
+										origin: origin.trim().replace(/\/$/, ''),
+									},
+								},
+								{
+									onSuccess: () => {
+										setSelected(null);
+										toast.success('App link published');
+									},
+								},
+							);
+						}}
+					>
+						<TextField label="Public release URL" value={origin} onChange={setOrigin} />
+						<p className="text-xs text-muted-foreground">
+							Enter the URL of your deployed, read-only release. Anyone with this app link can open
+							it.
+						</p>
+						{publication.isError && (
+							<p role="alert" className="text-sm text-destructive">
+								{publication.error.message}
+							</p>
+						)}
+						<div className="flex gap-2">
+							<Button type="submit" isDisabled={!origin.trim() || publication.isPending}>
+								Publish link
+							</Button>
+							{currentLinks?.some(
+								(link) => link.registration_id === selected.registration_id && link.public_origin,
+							) && (
+								<Button
+									variant="ghost"
+									isDisabled={publication.isPending}
+									onPress={() =>
+										publication.mutate(
+											{
+												slug: selected.slug,
+												publication: { registration_id: selected.registration_id, origin: null },
+											},
+											{
+												onSuccess: () => {
+													setSelected(null);
+													toast.success('App link is private');
+												},
+											},
+										)
+									}
+								>
+									Make link private
+								</Button>
+							)}
+							<Button
+								variant="ghost"
+								isDisabled={publication.isPending}
+								onPress={() => setSelected(null)}
+							>
+								Cancel
+							</Button>
+						</div>
+					</form>
+				)}
 				{canManage && (
 					<>
 						<p className="text-xs text-muted-foreground">

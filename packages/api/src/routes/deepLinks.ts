@@ -1,6 +1,13 @@
 import { ulidString } from '@marimo-hub/core/string-formats';
 import { createRoute, z } from '@hono/zod-openapi';
-import { DeepLinkAccessSchema, DeepLinkSchema, DeepLinkSlugSchema } from '@marimo-hub/core';
+import {
+	DeepLinkAccessSchema,
+	DeepLinkSchema,
+	DeepLinkSlugSchema,
+	PublicAppOriginSchema,
+	isApprovedPublicAppOrigin,
+	ValidationError,
+} from '@marimo-hub/core';
 import {
 	assertProjectRole,
 	authorizationService,
@@ -72,6 +79,12 @@ const register = createRoute({
 				slug: DeepLinkSlugSchema,
 				kind: z.literal('app').default('app'),
 				access: DeepLinkAccessSchema.default({ mode: 'inherit' }),
+				publication: z
+					.object({
+						registration_id: ulidString(),
+						origin: PublicAppOriginSchema.nullable(),
+					})
+					.optional(),
 			}),
 		),
 	},
@@ -159,11 +172,22 @@ app.openapi(register, async (c) => {
 		deps,
 	);
 	await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
-	const link = await deps.services.deepLinks.register(
-		c.req.valid('json').slug,
-		{ kind: 'app', project_id: pid, notebook_id: nid },
-		user.id,
-	);
+	const { slug, publication } = c.req.valid('json');
+	const target = { kind: 'app' as const, project_id: pid, notebook_id: nid };
+	if (
+		publication?.origin &&
+		!isApprovedPublicAppOrigin(publication.origin, deps.publicAppReleaseHostSuffix)
+	) {
+		throw new ValidationError('Use an approved Marimo public release URL');
+	}
+	const link = publication
+		? await deps.services.deepLinks.setPublicOrigin(
+				slug,
+				target,
+				publication.registration_id,
+				publication.origin,
+			)
+		: await deps.services.deepLinks.register(slug, target, user.id);
 	return c.json({ success: true as const, data: link }, 200);
 });
 app.openapi({ ...release, path: `${notebookPath}/:slug{[\\s\\S]+}`, hide: true }, async (c) => {
