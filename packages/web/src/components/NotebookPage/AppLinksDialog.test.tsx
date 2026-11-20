@@ -127,7 +127,7 @@ describe('AppLinksDialog', () => {
 	it('publishes an existing link and can make it private again', async () => {
 		const user = setupUser();
 		const fetch = setup();
-		await user.click(await screen.findByRole('button', { name: 'Publish', exact: true }));
+		await user.click(await screen.findByRole('button', { name: 'Publish' }));
 		await user.type(
 			screen.getByRole('textbox', { name: 'Public release URL' }),
 			'https://marimo-public-sales-123.us-west1.run.app/',
@@ -135,7 +135,7 @@ describe('AppLinksDialog', () => {
 		await user.click(screen.getByRole('button', { name: 'Publish link' }));
 		await user.click(await screen.findByRole('button', { name: 'Manage publication' }));
 		await user.click(screen.getByRole('button', { name: 'Make link private' }));
-		await screen.findByRole('button', { name: 'Publish', exact: true });
+		await screen.findByRole('button', { name: 'Publish' });
 		expect(
 			fetch.mock.calls
 				.filter(([, init]) => init?.method === 'POST')
