@@ -13,9 +13,9 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 READ_ROUTES = frozenset({"/", "/favicon.ico", "/manifest.json", "/health"})
-READ_PREFIXES = ("/assets/", "/@file/")
 PHOTO_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".avif"})
 UI_UPDATE = "/api/kernel/set_ui_element_value"
+MAX_WIDGET_BODY_BYTES = 64 * 1024
 
 
 class PublicDashboard:
@@ -25,7 +25,7 @@ class PublicDashboard:
         *,
         origin: str,
         max_connections: int = 12,
-        connection_seconds: float = 300,
+        connection_seconds: float = 270,
     ) -> None:
         url = urlsplit(origin)
         if (
@@ -63,11 +63,34 @@ class PublicDashboard:
                 await send({"type": "websocket.close", "code": 1013})
                 return
             self.connections += 1
+            connected = False
+
+            async def track_receive():
+                nonlocal connected
+                message = await receive()
+                if message["type"] == "websocket.disconnect":
+                    connected = False
+                return message
+
+            async def track_send(message):
+                nonlocal connected
+                if message["type"] == "websocket.accept":
+                    connected = True
+                elif message["type"] == "websocket.close":
+                    connected = False
+                await send(message)
+
             try:
-                async with asyncio.timeout(self.connection_seconds):
-                    await self.app(scope, receive, send)
-            except TimeoutError:
-                await send({"type": "websocket.close", "code": 1001})
+                deadline = asyncio.timeout(self.connection_seconds)
+                try:
+                    async with deadline:
+                        await self.app(scope, track_receive, track_send)
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                # marimo's streaming handler can consume the timeout cancellation.
+                if deadline.expired() and connected:
+                    await send({"type": "websocket.close", "code": 1001})
             finally:
                 self.connections -= 1
             return
@@ -81,7 +104,7 @@ class PublicDashboard:
             and method in {"GET", "HEAD"}
             and (
                 path in READ_ROUTES
-                or path.startswith(READ_PREFIXES)
+                or path.startswith("/assets/")
                 or (
                     path.startswith("/public/")
                     and Path(path).suffix.lower() in PHOTO_EXTENSIONS
@@ -94,6 +117,36 @@ class PublicDashboard:
                 "Not found", status_code=404, headers={"Cache-Control": "no-store"}
             )(scope, receive, send)
             return
+
+        if method == "POST":
+            body = bytearray()
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                chunk = message.get("body", b"")
+                if len(body) + len(chunk) > MAX_WIDGET_BODY_BYTES:
+                    await PlainTextResponse(
+                        "Widget update too large",
+                        status_code=413,
+                        headers={"Cache-Control": "no-store"},
+                    )(scope, receive, send)
+                    return
+                body.extend(chunk)
+                if not message.get("more_body", False):
+                    break
+
+            upstream_receive = receive
+            pending_body = True
+
+            async def read_widget_body():
+                nonlocal pending_body
+                if pending_body:
+                    pending_body = False
+                    return {"type": "http.request", "body": bytes(body)}
+                return await upstream_receive()
+
+            receive = read_widget_body
 
         async def send_without_cache(message):
             if message["type"] == "http.response.start":
@@ -112,7 +165,7 @@ class PublicDashboard:
         await self.app(scope, receive, send_without_cache)
 
 
-def create_app() -> ASGIApp:
+def create_app(*, connection_seconds: float = 270) -> ASGIApp:
     release = Path(os.environ.get("PUBLIC_DASHBOARD_RELEASE", "/release")).resolve()
     notebook = release / "notebook.py"
     if not notebook.is_file():
@@ -123,7 +176,7 @@ def create_app() -> ASGIApp:
             include_code=False,
             redirect_console_to_browser=False,
             show_tracebacks=False,
-            session_ttl=20,
+            session_ttl=0,
         )
         .with_app(path="", root=str(notebook))
         .build()
@@ -136,5 +189,7 @@ def create_app() -> ASGIApp:
         routes.append(Mount("/public", StaticFiles(directory=photos)))
     routes.append(Mount("/", app=app))
     return PublicDashboard(
-        Starlette(routes=routes), origin=os.environ["PUBLIC_DASHBOARD_ORIGIN"]
+        Starlette(routes=routes),
+        origin=os.environ["PUBLIC_DASHBOARD_ORIGIN"],
+        connection_seconds=connection_seconds,
     )

@@ -4,7 +4,7 @@ from starlette.testclient import TestClient
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from gateway import PublicDashboard
+from gateway import MAX_WIDGET_BODY_BYTES, PublicDashboard
 
 ORIGIN = "http://127.0.0.1:8080"
 
@@ -24,7 +24,7 @@ async def runtime(scope: Scope, receive: Receive, send: Send) -> None:
 
 def test_read_and_widget_requests_are_available():
     client = TestClient(PublicDashboard(runtime, origin=ORIGIN))
-    for path in ["/", "/assets/main.js", "/public/photo.jpg", "/@file/photo.jpg"]:
+    for path in ["/", "/assets/main.js", "/public/photo.jpg"]:
         response = client.get(path)
         assert response.text == "dashboard"
         assert response.headers["Cache-Control"] == "no-store"
@@ -43,6 +43,7 @@ def test_read_and_widget_requests_are_available():
         ("GET", "/api/v1/projects"),
         ("GET", "/public/%2e%2e/notebook.py"),
         ("GET", "/notebook.py"),
+        ("GET", "/@file/photo.jpg"),
         ("POST", "/api/kernel/run"),
         ("POST", "/api/kernel/function_call"),
         ("POST", "/api/export/html"),
@@ -98,3 +99,13 @@ def test_websockets_are_bounded_and_close_on_timeout():
             socket.receive_text()
         assert timed_out.value.code == 1001
     assert app.connections == 0
+
+
+def test_widget_update_limits_streamed_body():
+    client = TestClient(PublicDashboard(runtime, origin=ORIGIN))
+    response = client.post(
+        "/api/kernel/set_ui_element_value",
+        headers={"Origin": ORIGIN},
+        content=iter([b"a" * MAX_WIDGET_BODY_BYTES, b"b"]),
+    )
+    assert response.status_code == 413

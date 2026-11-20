@@ -11,7 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import pytest
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 SOURCE_MARKER = "fixture_source_only_12b38704"
 NOTEBOOK = """import marimo
@@ -53,7 +55,7 @@ def fetch(origin, path, session, *, token="", body=None):
 
 
 @contextmanager
-def live_release(tmp_path):
+def live_release(tmp_path, *, connection_seconds=270):
     (tmp_path / "notebook.py").write_text(NOTEBOOK)
     (tmp_path / "public").mkdir()
     (tmp_path / "public" / "approved.jpg").write_bytes(b"approved-photo-bytes")
@@ -64,12 +66,11 @@ def live_release(tmp_path):
     with Popen(
         [
             sys.executable,
-            "-m",
-            "uvicorn",
-            "gateway:create_app",
-            "--factory",
-            "--port",
-            str(port),
+            "-c",
+            (
+                "import uvicorn; from gateway import create_app; "
+                f"uvicorn.run(create_app(connection_seconds={connection_seconds}), port={port})"
+            ),
         ],
         cwd=Path(__file__).resolve().parents[1],
         env={
@@ -136,3 +137,25 @@ def test_live_release_is_interactive_without_exposing_source(tmp_path):
             b"approved-photo-bytes",
         )
         assert fetch(origin, "/api/files/download?path=notebook.py", session)[0] == 404
+
+
+def test_live_socket_sends_close_at_its_deadline(tmp_path):
+    async def check_deadline(origin):
+        for _ in range(2):
+            async with websockets.connect(
+                origin.replace("http:", "ws:") + f"/ws?session_id={uuid4()}",
+                origin=origin,
+            ) as websocket:
+                async with asyncio.timeout(8):
+                    while "Selected store district: North" not in await websocket.recv(
+                        decode=True
+                    ):
+                        pass
+                    with pytest.raises(ConnectionClosed) as timed_out:
+                        while True:
+                            await websocket.recv()
+                    assert timed_out.value.rcvd is not None
+                    assert timed_out.value.rcvd.code == 1001
+
+    with live_release(tmp_path, connection_seconds=2) as origin:
+        asyncio.run(check_deadline(origin))

@@ -10,7 +10,8 @@ Create a directory called `release` in this build context. Put the reviewed
 reader in `release/notebook.py`, approved read-only inputs alongside it, and
 approved photos in `release/public/`. Reference those photos by their
 `/public/<name>.jpg` URLs. Paths to private photo sources must be removed from
-the reader. Use `mo.notebook_dir()` to locate local inputs from Python.
+the reader. Use `mo.notebook_dir()` to locate local inputs from Python. The gateway serves
+approved photos from `/public/` and does not serve marimo virtual files.
 
 Apply any approved data corrections before assembling the release. Do not
 include the correction log, writeback callbacks, credential files, shared hub
@@ -39,7 +40,8 @@ requests. Do not use a shared corporate custom-domain cookie on that origin.
 Deploy the immutable image privately first. Use one instance, one Uvicorn
 worker, a five-minute Cloud Run request timeout and enough request concurrency
 for sockets and widget requests (for example, 24). The gateway caps open
-sockets at 12 and closes each socket after five minutes. Do not allocate
+sockets at 12 and closes each socket after four and a half minutes.
+A disconnected kernel expires immediately, so a reconnect starts a fresh session. Do not allocate
 a second instance because this gateway has no shared session state.
 
 After confirming the release and endpoint, grant `allUsers` the Cloud Run
