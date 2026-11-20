@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!gateway.py
+!release
+!release/**
