@@ -25,7 +25,7 @@ describe('public app links', () => {
 	it('redirects a published registration without forwarding query data', async () => {
 		const { app, resolve } = makeApp();
 		for (const path of ['/app/sales/week', '/app/sales%2Fweek']) {
-			const response = await app.request(path + '?token=private');
+			const response = await app.request(`${path}?token=private`);
 			expect(response.status).toBe(302);
 			expect(response.headers.get('location')).toBe(releaseOrigin);
 			expect(response.headers.get('cache-control')).toBe('no-store');
