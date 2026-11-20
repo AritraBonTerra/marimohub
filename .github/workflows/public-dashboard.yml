@@ -1,0 +1,31 @@
+name: Public dashboard
+on:
+  pull_request:
+    paths:
+      - 'fork/public-dashboard/**'
+      - '.github/workflows/public-dashboard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fork/public-dashboard/**'
+      - '.github/workflows/public-dashboard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fork/public-dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: '3.13'
+      - run: |
+          uv run --locked ruff check
+          uv run --locked ruff format --check
+          uv run --locked ty check
+          uv run --locked python -m pytest
