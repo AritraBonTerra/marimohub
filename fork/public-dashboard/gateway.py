@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +17,8 @@ READ_ROUTES = frozenset({"/", "/favicon.ico", "/manifest.json", "/health"})
 PHOTO_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".avif"})
 UI_UPDATE = "/api/kernel/set_ui_element_value"
 MAX_WIDGET_BODY_BYTES = 64 * 1024
+# The locked marimo run-mode kernel uses this CPython thread name suffix.
+KERNEL_THREAD_SUFFIX = " (launch_kernel_with_cleanup)"
 
 
 class PublicDashboard:
@@ -59,7 +62,13 @@ class PublicDashboard:
             if path != "/ws" or not local_origin:
                 await send({"type": "websocket.close", "code": 1008})
                 return
-            if self.connections >= self.max_connections:
+            # A detached kernel can keep executing until its current cell returns.
+            # Count live kernels and sockets, including those still starting.
+            kernels = sum(
+                thread.name.endswith(KERNEL_THREAD_SUFFIX)
+                for thread in threading.enumerate()
+            )
+            if self.connections + kernels >= self.max_connections:
                 await send({"type": "websocket.close", "code": 1013})
                 return
             self.connections += 1
@@ -165,7 +174,9 @@ class PublicDashboard:
         await self.app(scope, receive, send_without_cache)
 
 
-def create_app(*, connection_seconds: float = 270) -> ASGIApp:
+def create_app(
+    *, connection_seconds: float = 270, max_connections: int = 12
+) -> ASGIApp:
     release = Path(os.environ.get("PUBLIC_DASHBOARD_RELEASE", "/release")).resolve()
     notebook = release / "notebook.py"
     if not notebook.is_file():
@@ -192,4 +203,5 @@ def create_app(*, connection_seconds: float = 270) -> ASGIApp:
         Starlette(routes=routes),
         origin=os.environ["PUBLIC_DASHBOARD_ORIGIN"],
         connection_seconds=connection_seconds,
+        max_connections=max_connections,
     )

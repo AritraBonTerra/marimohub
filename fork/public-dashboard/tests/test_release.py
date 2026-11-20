@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 import websockets
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 SOURCE_MARKER = "fixture_source_only_12b38704"
 NOTEBOOK = """import marimo
@@ -55,8 +55,10 @@ def fetch(origin, path, session, *, token="", body=None):
 
 
 @contextmanager
-def live_release(tmp_path, *, connection_seconds=270):
-    (tmp_path / "notebook.py").write_text(NOTEBOOK)
+def live_release(
+    tmp_path, *, connection_seconds=270, max_connections=12, notebook=NOTEBOOK
+):
+    (tmp_path / "notebook.py").write_text(notebook)
     (tmp_path / "public").mkdir()
     (tmp_path / "public" / "approved.jpg").write_bytes(b"approved-photo-bytes")
     with socket.socket() as listener:
@@ -69,7 +71,8 @@ def live_release(tmp_path, *, connection_seconds=270):
             "-c",
             (
                 "import uvicorn; from gateway import create_app; "
-                f"uvicorn.run(create_app(connection_seconds={connection_seconds}), port={port})"
+                f"uvicorn.run(create_app(connection_seconds={connection_seconds}, "
+                f"max_connections={max_connections}), port={port})"
             ),
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -159,3 +162,37 @@ def test_live_socket_sends_close_at_its_deadline(tmp_path):
 
     with live_release(tmp_path, connection_seconds=2) as origin:
         asyncio.run(check_deadline(origin))
+
+
+def test_live_kernel_counts_against_budget_after_disconnect(tmp_path):
+    notebook = NOTEBOOK.replace(
+        "    district = mo.ui.dropdown",
+        "    import time\n"
+        "    from pathlib import Path\n"
+        "    Path(mo.notebook_dir(), 'started').touch()\n"
+        "    while not Path(mo.notebook_dir(), 'stop').exists():\n"
+        "        time.sleep(0.02)\n"
+        "    district = mo.ui.dropdown",
+    )
+
+    async def check_budget(origin):
+        def connect():
+            return websockets.connect(
+                origin.replace("http:", "ws:") + f"/ws?session_id={uuid4()}",
+                origin=origin,
+            )
+
+        try:
+            async with asyncio.timeout(8):
+                async with connect():
+                    while not (tmp_path / "started").exists():
+                        await asyncio.sleep(0.02)
+                with pytest.raises(InvalidStatus) as limited:
+                    async with connect():
+                        pytest.fail("The disconnected kernel still occupies the slot")
+                assert limited.value.response.status_code == 403
+        finally:
+            (tmp_path / "stop").touch()
+
+    with live_release(tmp_path, max_connections=1, notebook=notebook) as origin:
+        asyncio.run(check_budget(origin))

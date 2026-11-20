@@ -39,10 +39,12 @@ requests. Do not use a shared corporate custom-domain cookie on that origin.
 
 Deploy the immutable image privately first. Use one instance, one Uvicorn
 worker, a five-minute Cloud Run request timeout and enough request concurrency
-for sockets and widget requests (for example, 24). The gateway caps open
-sockets at 12 and closes each socket after four and a half minutes.
-A disconnected kernel expires immediately, so a reconnect starts a fresh session. Do not allocate
-a second instance because this gateway has no shared session state.
+for sockets and widget requests (for example, 24). The gateway uses a
+combined capacity budget of 12 for open sockets and live kernels. Six fully
+started sessions can run concurrently. Each socket closes after four and a half
+minutes. A reconnect starts a fresh session. A disconnected kernel still uses
+capacity until its current work finishes. Keep the service on one instance
+because the gateway has no shared session state.
 
 After confirming the release and endpoint, grant `allUsers` the Cloud Run
 Invoker role **on this release service only**. Open the release URL with a new
