@@ -33,6 +33,7 @@ import { serveSpaFallback, serveStaticWithCache } from './staticCache';
 import { RequestStorage } from './requestStorage';
 import { SHELL_PREFETCH_CSP } from './shellPrefetch';
 import { attachSandboxProxyUpgrade } from './sandboxProxyWs';
+import { parsePublicAppReleases, redirectPublicAppLinks } from './publicAppLinks';
 
 const CLEANUP_TIMEOUT_MS = 10_000;
 const MAX_HTTP_GRACE_MS = 10_000;
@@ -87,9 +88,11 @@ export async function bootstrap(
 	// remediation block to stderr and exit. (Transient backend problems go through the
 	// non-fatal preflight below instead, so they never crashloop a replica.)
 	let validatedEnv: Record<string, string | undefined>;
+	let publicAppReleases: ReturnType<typeof parsePublicAppReleases>;
 	let deps: ApiDeps;
 	try {
 		validatedEnv = validateServerEnv(env);
+		publicAppReleases = parsePublicAppReleases(validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASES);
 		deps = await createDeps(validatedEnv, metrics, {
 			metadataFactory: nodeMetadataFactory,
 			tracing: otel?.tracing ?? false,
@@ -198,6 +201,9 @@ export async function bootstrap(
 	// Serve the prebuilt SPA. API routes (registered inside createApi) are terminal,
 	// so they take precedence; everything else falls through to static assets, with
 	// a single-page-app fallback to index.html.
+	if (publicAppReleases.size > 0) {
+		app.use('/app/*', redirectPublicAppLinks(publicAppReleases, deps.services.deepLinks));
+	}
 	const spaFallback = serveSpaFallback(staticRoot, validatedEnv.MARIMOHUB_APP_BASE_URL);
 	app.get('/', spaFallback);
 	app.get('/index.html', spaFallback);

@@ -43,8 +43,7 @@ export function AppLinksDialog({
 		<DialogModal isOpen onClose={onClose} title="App links" width="lg">
 			<div className="flex flex-col gap-4">
 				<p className="text-sm text-muted-foreground">
-					App links use the notebook’s existing permissions. People must sign in and have permission
-					to run the app.
+					Published app links open without sign-in. Other app links require notebook access.
 				</p>
 				{!links.isError && !links.isFetchedAfterMount && (
 					<output className="text-sm">Loading links…</output>

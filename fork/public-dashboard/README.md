@@ -76,3 +76,25 @@ Run the hub's normal checks. Validate the new hub image in a tagged,
 zero-traffic Cloud Run revision with the existing Google settings before
 moving traffic. Upgrade the separate marimo runtime only when its own tests
 pass against the new lockfile.
+
+## Share through the hub
+
+Create an app link in the notebook’s **Share app → App links** dialog. Use the
+authenticated notebook deep-links API to find that link’s `registration_id`.
+After deploying the reviewed release, set `MARIMOHUB_PUBLIC_APP_RELEASES` on
+the Node server to a JSON object keyed by app slug:
+
+```json
+{
+	"team/overview": {
+		"registration_id": "01J00000000000000000000000",
+		"origin": "https://dashboard.example.com"
+	}
+}
+```
+
+Copy the existing `/app/team/overview` link from the dialog. A signed-out
+browser opening it goes to the public release. Each entry applies only to
+the listed registration. Removing or reusing an app slug ends its redirect.
+To withdraw the dashboard origin as well, remove its Cloud Run Invoker
+binding as described above.
