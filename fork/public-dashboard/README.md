@@ -21,6 +21,8 @@ expose marimo's general-purpose function-call API and therefore does not
 support widgets that require that API.
 
 Build this directory as its own Docker context after reviewing the release.
+For Cloud Build, run `gcloud builds submit --tag IMAGE .` from this directory.
+The Cloud Build ignore file restricts the upload to the image inputs.
 The Dockerfile installs the locked runtime and copies the release into the
 image. Identify the resulting image by digest in deployment records. Later
 changes to the source notebook cannot change an already deployed release.
