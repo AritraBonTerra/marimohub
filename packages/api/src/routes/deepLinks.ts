@@ -174,7 +174,7 @@ async function setLegacyPublicOrigin(
 		const attached = current.public_origin;
 		if (
 			(attached && isManaged(attached)) ||
-			(!attached && managed && typeof (await managed.resolveManagedOrigin(current)) === 'string')
+			typeof (await managed?.resolveManagedOrigin(current)) === 'string'
 		)
 			throw new ConflictError('Unpublish the managed public dashboard instead');
 		if (attached === null) return withManagedOrigin(deps, current);

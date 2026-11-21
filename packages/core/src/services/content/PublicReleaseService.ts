@@ -340,13 +340,24 @@ export class PublicReleaseService {
 		return { ids: index.release_ids, etag: object.etag };
 	}
 
+	private async assertPublishCapacity(ids: readonly string[]): Promise<void> {
+		if (ids.length < this.limits.maxLiveReleases) return;
+		// Terminal releases may still be indexed for stale pointer cleanup, but their
+		// Cloud Run services are gone (or never created). Only reserve capacity for live work.
+		const records = await mapWithConcurrency(ids, 8, (id) => this.getRelease(id));
+		if (
+			records.filter((record) => !record || !isTerminal(record)).length >=
+			this.limits.maxLiveReleases
+		)
+			throw new ConflictError('The public release limit for this hub has been reached');
+	}
+
 	/** The index both reserves concurrency-limited capacity and makes releases discoverable. */
 	private async updateLiveIndex(releaseId: string, add: boolean): Promise<void> {
 		for (let attempt = 0; attempt < 8; attempt++) {
 			const { ids, etag } = await this.readLiveIndex();
 			if (ids.includes(releaseId) === add) return;
-			if (add && ids.length >= this.limits.maxLiveReleases)
-				throw new ConflictError('The public release limit for this hub has been reached');
+			if (add) await this.assertPublishCapacity(ids);
 			try {
 				await this.bucket.put(
 					paths.publicReleaseLiveIndex,
@@ -621,8 +632,7 @@ export class PublicReleaseService {
 		}
 		if (total > this.limits.maxTotalAssetBytes)
 			throw new ValidationError('Selected files exceed the total size limit');
-		if ((await this.readLiveIndex()).ids.length >= this.limits.maxLiveReleases)
-			throw new ConflictError('The public release limit for this hub has been reached');
+		await this.assertPublishCapacity((await this.readLiveIndex()).ids);
 
 		const codeObject = await this.bucket.get(layout.codeKey);
 		if (!codeObject) throw new NotFoundError(`Version ${input.versionId} not found`);
@@ -1094,8 +1104,18 @@ export class PublicReleaseService {
 		reason: PublicReleaseWithdrawReason,
 		error?: { code: string; message: string },
 	): Promise<Step> {
+		const { record } = current;
+		await this.updateHead(
+			record.registration_id,
+			() => this.emptyHead(record),
+			(head) =>
+				head.pending_release_id === record.release_id &&
+				head.cancelling_release_id !== record.release_id
+					? { ...head, cancelling_release_id: record.release_id }
+					: null,
+		);
 		const now = this.now();
-		const next = await this.write(current, {
+		return this.write(current, {
 			...current.record,
 			state: 'unpublishing',
 			withdraw_requested: true,
@@ -1105,7 +1125,6 @@ export class PublicReleaseService {
 			next_retry_at: undefined,
 			...(error ? { error } : {}),
 		});
-		return next;
 	}
 
 	/** Why a release must be withdrawn, or null while its link, target and labels still allow it. */

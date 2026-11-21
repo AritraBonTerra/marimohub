@@ -283,25 +283,36 @@ describe('public release routes', () => {
 		expect((await services.deepLinks.list(target))[0].public_origin).toBe(managedName);
 	});
 
-	it('never reports a legacy disconnect for a live managed release', async () => {
-		const release = await expectOk<PublicReleaseRecord>(
-			await api.request('POST', releasesPath(), {
-				slug: 'sales',
-				registration_id: link.registration_id,
-				version_id: versionId,
-			}),
-			202,
-		);
-		await settle(release.release_id);
-		await expectError(
-			await api.request('POST', `${notebookPath()}/deep-links`, {
-				slug: 'sales',
-				publication: { registration_id: link.registration_id, origin: null },
-			}),
-			409,
-		);
-		expect((await services.publicReleases!.getRelease(release.release_id))?.state).toBe('active');
-	});
+	it.each([undefined, 'https://marimo-public-legacy-123456.us-west1.run.app'])(
+		'never reports a legacy disconnect for a live managed release with stored origin %s',
+		async (storedOrigin) => {
+			const release = await expectOk<PublicReleaseRecord>(
+				await api.request('POST', releasesPath(), {
+					slug: 'sales',
+					registration_id: link.registration_id,
+					version_id: versionId,
+				}),
+				202,
+			);
+			await settle(release.release_id);
+			if (storedOrigin)
+				await services.deepLinks.setPublicOrigin(
+					link.slug,
+					link.target,
+					link.registration_id,
+					storedOrigin,
+				);
+			await expectError(
+				await api.request('POST', `${notebookPath()}/deep-links`, {
+					slug: 'sales',
+					publication: { registration_id: link.registration_id, origin: null },
+				}),
+				409,
+			);
+			expect((await services.publicReleases!.getRelease(release.release_id))?.state).toBe('active');
+			expect((await services.deepLinks.resolve(link.slug)).public_origin).toBe(storedOrigin);
+		},
+	);
 
 	it('lets a hub admin stop a release as an audited emergency without publishing', async () => {
 		const release = await expectOk<PublicReleaseRecord>(

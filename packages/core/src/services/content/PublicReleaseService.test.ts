@@ -8,6 +8,7 @@ import type { DeepLinkTarget } from '../../deepLinks';
 import { ConflictError, ForbiddenError, ValidationError } from '../../errors';
 import { paths } from '../../paths';
 import { sha256Hex } from '../../internal/sha256';
+import { PublicReleaseHostFatalError } from '../../ports/publicReleaseHost';
 import {
 	normalizeApprovedAssetPath,
 	deriveAssetExposure,
@@ -265,6 +266,26 @@ describe('PublicReleaseService', () => {
 		expect(await approvedOrigin(initial.slug)).toBeNull();
 	});
 
+	it('can stop the live app while an automatically failed replacement is withdrawing', async () => {
+		const live = await publish();
+		await settle(live.release_id);
+		const replacement = await publish();
+		host.hooks.expose = () => {
+			throw new PublicReleaseHostFatalError('test_failure', 'Synthetic release failure');
+		};
+		host.pollsUntilDeleted = 5;
+		expect(await releases.advance(replacement.release_id, 'worker-a')).toMatchObject({
+			state: 'unpublishing',
+			withdraw_reason: 'publish_failed',
+		});
+		expect(await releases.advance(replacement.release_id, 'worker-a')).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await approvedOrigin()).toBe(live.origin);
+		await releases.requestUnpublish(live.release_id, 'user');
+		expect(await approvedOrigin()).toBeNull();
+	});
+
 	it('limits preview downloads while showing that more files exist', async () => {
 		const bounded = makeService({ limits: { maxAssetBytes: 6, maxTotalAssetBytes: 6 } });
 		await putAsset('a.txt', 'first');
@@ -454,6 +475,27 @@ describe('PublicReleaseService', () => {
 			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBe(release.origin);
 			await releases.reconcileTick('worker-a');
 			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBeNull();
+		} finally {
+			clear.mockRestore();
+		}
+	});
+
+	it('frees release capacity while terminal legacy pointer cleanup is still retrying', async () => {
+		const capped = makeService({ limits: { maxLiveReleases: 1 } });
+		const release = await publish([], 'sales', capped);
+		await settle(release.release_id, capped);
+		const clear = vi
+			.spyOn(services.deepLinks, 'clearPublicOrigin')
+			.mockRejectedValue(new Error('Unreadable legacy pointer'));
+		try {
+			await capped.requestUnpublish(release.release_id, 'user');
+			expect(await capped.advance(release.release_id, 'worker-a')).toMatchObject({
+				state: 'unpublished',
+			});
+			expect(await (await bucket.get(paths.publicReleaseLiveIndex))?.text()).toContain(
+				release.release_id,
+			);
+			expect(await publish([], 'other', capped)).toMatchObject({ state: 'publishing' });
 		} finally {
 			clear.mockRestore();
 		}
