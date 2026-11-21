@@ -699,9 +699,11 @@ function renderNotebookPage(model: ReturnType<typeof useNotebookPageModel>) {
 					<ShareMenu
 						projectId={pid!}
 						notebookId={nid!}
-						canManageLinks={canManageLinks}
-						canPublishLinks={canPublishLinks}
-						canEmergencyUnpublish={canEmergencyUnpublish}
+						appLinkPermissions={{
+							manage: canManageLinks,
+							publish: canPublishLinks,
+							emergencyUnpublish: canEmergencyUnpublish,
+						}}
 						isApp={isApp}
 					/>
 				</div>

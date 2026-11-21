@@ -48,7 +48,6 @@ export function AppLinksDialog({
 	const register = useRegisterDeepLink(projectId, notebookId);
 	const release = useReleaseDeepLink(projectId, notebookId);
 	const { copy } = useCopyToClipboard();
-	const [slug, setSlug] = useState('');
 	const [selected, setSelected] = useState<{ slug: string; registration_id: string } | null>(null);
 	const [origin, setOrigin] = useState('');
 	const publication = useRegisterDeepLink(projectId, notebookId);
@@ -75,8 +74,6 @@ export function AppLinksDialog({
 	const selectedLink = currentLinks?.find(
 		(link) => link.registration_id === selected?.registration_id,
 	);
-	const canonicalSlug = slug.trim().toLowerCase();
-	const valid = DeepLinkSlugSchema.safeParse(canonicalSlug).success;
 	const pending = register.isPending || release.isPending;
 
 	return (
@@ -222,124 +219,165 @@ export function AppLinksDialog({
 					</p>
 				)}
 				{canPublish && mode === 'manual' && selected && (
-					<form
-						className="flex flex-col gap-2 rounded-md border p-3"
-						onSubmit={(event) => {
-							event.preventDefault();
-							if (!origin.trim() || publication.isPending) return;
-							publication.mutate(
-								{
-									slug: selected.slug,
-									publication: {
-										registration_id: selected.registration_id,
-										origin: origin.trim().replace(/\/$/, ''),
-									},
-								},
-								{
-									onSuccess: () => {
-										setSelected(null);
-										toast.success('App link published');
-									},
-								},
-							);
-						}}
-					>
-						<TextField label="Public release URL" value={origin} onChange={setOrigin} />
-						<p className="text-xs text-muted-foreground">
-							Enter the URL of your deployed, read-only release. Anyone with this app link can open
-							it. The direct release URL stays public until access is removed in Cloud Run.
-						</p>
-						{publication.isError && (
-							<p role="alert" className="text-sm text-destructive">
-								{publication.error.message}
-							</p>
-						)}
-						<div className="flex gap-2">
-							<Button type="submit" isDisabled={!origin.trim() || publication.isPending}>
-								Publish link
-							</Button>
-							{selectedLink?.public_origin && (
-								<Button
-									variant="ghost"
-									isDisabled={publication.isPending}
-									onPress={() =>
-										publication.mutate(
-											{
-												slug: selected.slug,
-												publication: { registration_id: selected.registration_id, origin: null },
-											},
-											{
-												onSuccess: () => {
-													setSelected(null);
-													toast.success('Public release disconnected');
-												},
-											},
-										)
-									}
-								>
-									Disconnect public release
-								</Button>
-							)}
-							<Button
-								variant="ghost"
-								isDisabled={publication.isPending}
-								onPress={() => setSelected(null)}
-							>
-								Cancel
-							</Button>
-						</div>
-					</form>
+					<ManualReleaseForm
+						selected={selected}
+						origin={origin}
+						setOrigin={setOrigin}
+						hasPublicOrigin={Boolean(selectedLink?.public_origin)}
+						publication={publication}
+						onClose={() => setSelected(null)}
+					/>
 				)}
 				{canManage && (
-					<>
-						<p className="text-xs text-muted-foreground">
-							Removing a link makes its name available immediately. Old shared URLs may then open
-							another app. Running apps and notebook permissions are unaffected.
-						</p>
-						<form
-							className="flex flex-col gap-3 border-t pt-4"
-							onSubmit={(event) => {
-								event.preventDefault();
-								if (!valid || pending) return;
-								register.mutate(canonicalSlug, {
-									onSuccess: () => {
-										setSlug('');
-										toast.success('App link created');
-									},
-								});
-							}}
-						>
-							<TextField
-								label="App slug"
-								value={slug}
-								onChange={(value) => {
-									setSlug(value);
-									register.reset();
-								}}
-								placeholder="team/overview"
-								maxLength={63}
-								isDisabled={pending}
-							/>
-							<p className="text-xs text-muted-foreground">
-								Use letters, digits, and hyphens, with / between segments. Start and end each
-								segment with a letter or digit. Maximum 63 characters. Names are shared across this
-								hub.
-							</p>
-							{valid && (
-								<p className="break-all text-xs text-muted-foreground">{urlFor(canonicalSlug)}</p>
-							)}
-							{register.isError && (
-								<p role="alert" className="text-sm text-destructive">
-									{register.error.message}
-								</p>
-							)}
-							<Button type="submit" isDisabled={!valid || pending}>
-								{register.isPending ? 'Creating…' : 'Create app link'}
-							</Button>
-						</form>
-					</>
+					<CreateAppLinkForm register={register} removing={release.isPending} urlFor={urlFor} />
 				)}
 			</div>
 		</DialogModal>
+	);
+}
+
+function ManualReleaseForm({
+	selected,
+	origin,
+	setOrigin,
+	hasPublicOrigin,
+	publication,
+	onClose,
+}: {
+	selected: { slug: string; registration_id: string };
+	origin: string;
+	setOrigin: (value: string) => void;
+	hasPublicOrigin: boolean;
+	publication: ReturnType<typeof useRegisterDeepLink>;
+	onClose: () => void;
+}) {
+	return (
+		<form
+			className="flex flex-col gap-2 rounded-md border p-3"
+			onSubmit={(event) => {
+				event.preventDefault();
+				if (!origin.trim() || publication.isPending) return;
+				publication.mutate(
+					{
+						slug: selected.slug,
+						publication: {
+							registration_id: selected.registration_id,
+							origin: origin.trim().replace(/\/$/, ''),
+						},
+					},
+					{
+						onSuccess: () => {
+							onClose();
+							toast.success('App link published');
+						},
+					},
+				);
+			}}
+		>
+			<TextField label="Public release URL" value={origin} onChange={setOrigin} />
+			<p className="text-xs text-muted-foreground">
+				Enter the URL of your deployed, read-only release. Anyone with this app link can open it.
+				The direct release URL stays public until access is removed in Cloud Run.
+			</p>
+			{publication.isError && (
+				<p role="alert" className="text-sm text-destructive">
+					{publication.error.message}
+				</p>
+			)}
+			<div className="flex gap-2">
+				<Button type="submit" isDisabled={!origin.trim() || publication.isPending}>
+					Publish link
+				</Button>
+				{hasPublicOrigin && (
+					<Button
+						variant="ghost"
+						isDisabled={publication.isPending}
+						onPress={() =>
+							publication.mutate(
+								{
+									slug: selected.slug,
+									publication: { registration_id: selected.registration_id, origin: null },
+								},
+								{
+									onSuccess: () => {
+										onClose();
+										toast.success('Public release disconnected');
+									},
+								},
+							)
+						}
+					>
+						Disconnect public release
+					</Button>
+				)}
+				<Button variant="ghost" isDisabled={publication.isPending} onPress={() => onClose()}>
+					Cancel
+				</Button>
+			</div>
+		</form>
+	);
+}
+
+function CreateAppLinkForm({
+	register,
+	removing,
+	urlFor,
+}: {
+	register: ReturnType<typeof useRegisterDeepLink>;
+	removing: boolean;
+	urlFor: (slug: string) => string;
+}) {
+	const [slug, setSlug] = useState('');
+	const canonicalSlug = slug.trim().toLowerCase();
+	const valid = DeepLinkSlugSchema.safeParse(canonicalSlug).success;
+	const pending = register.isPending || removing;
+
+	return (
+		<>
+			<p className="text-xs text-muted-foreground">
+				Removing a link makes its name available immediately. Old shared URLs may then open another
+				app. Running apps and notebook permissions are unaffected.
+			</p>
+			<form
+				className="flex flex-col gap-3 border-t pt-4"
+				onSubmit={(event) => {
+					event.preventDefault();
+					if (!valid || pending) return;
+					register.mutate(canonicalSlug, {
+						onSuccess: () => {
+							setSlug('');
+							toast.success('App link created');
+						},
+					});
+				}}
+			>
+				<TextField
+					label="App slug"
+					value={slug}
+					onChange={(value) => {
+						setSlug(value);
+						register.reset();
+					}}
+					placeholder="team/overview"
+					maxLength={63}
+					isDisabled={pending}
+				/>
+				<p className="text-xs text-muted-foreground">
+					Use letters, digits, and hyphens, with / between segments. Start and end each segment with
+					a letter or digit. Maximum 63 characters. Names are shared across this hub.
+				</p>
+				{valid && (
+					<p className="break-all text-xs text-muted-foreground">{urlFor(canonicalSlug)}</p>
+				)}
+				{register.isError && (
+					<p role="alert" className="text-sm text-destructive">
+						{register.error.message}
+					</p>
+				)}
+				<Button type="submit" isDisabled={!valid || pending}>
+					{register.isPending ? 'Creating…' : 'Create app link'}
+				</Button>
+			</form>
+		</>
 	);
 }

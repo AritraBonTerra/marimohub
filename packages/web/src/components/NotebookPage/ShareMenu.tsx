@@ -60,18 +60,14 @@ export function ShareUrlMenu({
 interface ShareMenuProps {
 	projectId: string;
 	notebookId: string;
-	canManageLinks?: boolean;
-	canPublishLinks?: boolean;
-	canEmergencyUnpublish?: boolean;
+	appLinkPermissions?: { manage: boolean; publish: boolean; emergencyUnpublish: boolean };
 	isApp?: boolean;
 }
 
 export function ShareMenu({
 	projectId,
 	notebookId,
-	canManageLinks = false,
-	canPublishLinks = false,
-	canEmergencyUnpublish = false,
+	appLinkPermissions,
 	isApp = false,
 }: ShareMenuProps) {
 	const links = useDisclosure();
@@ -92,9 +88,9 @@ export function ShareMenu({
 				<AppLinksDialog
 					projectId={projectId}
 					notebookId={notebookId}
-					canManage={canManageLinks}
-					canPublish={canPublishLinks}
-					canEmergencyUnpublish={canEmergencyUnpublish}
+					canManage={appLinkPermissions?.manage ?? false}
+					canPublish={appLinkPermissions?.publish}
+					canEmergencyUnpublish={appLinkPermissions?.emergencyUnpublish}
 					search={location.search}
 					onClose={links.close}
 				/>
