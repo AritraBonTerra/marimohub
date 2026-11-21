@@ -383,7 +383,7 @@ export class CloudRunPublicReleaseHost implements PublicReleaseHost {
 								bindings: (policy.bindings ?? []).flatMap((binding) => {
 									if (binding.role !== INVOKER_ROLE) return [binding];
 									const members = (binding.members ?? []).filter((m) => !PUBLIC_MEMBERS.has(m));
-									return members.length ? [{ ...binding, members }] : [];
+									return members.length > 0 ? [{ ...binding, members }] : [];
 								}),
 							}
 						: null,
