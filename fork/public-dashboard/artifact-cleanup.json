@@ -1,0 +1,17 @@
+[
+	{
+		"name": "purge-retired-dashboard-images",
+		"action": { "type": "Delete" },
+		"condition": {
+			"tagState": "tagged",
+			"tagPrefixes": ["retired-"],
+			"packageNamePrefixes": ["dashboard"],
+			"olderThan": "30d"
+		}
+	},
+	{
+		"name": "keep-base-images",
+		"action": { "type": "Keep" },
+		"condition": { "tagState": "tagged", "tagPrefixes": ["base-"] }
+	}
+]

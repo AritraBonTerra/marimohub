@@ -62,6 +62,7 @@ interface ShareMenuProps {
 	notebookId: string;
 	canManageLinks?: boolean;
 	canPublishLinks?: boolean;
+	canEmergencyUnpublish?: boolean;
 	isApp?: boolean;
 }
 
@@ -70,6 +71,7 @@ export function ShareMenu({
 	notebookId,
 	canManageLinks = false,
 	canPublishLinks = false,
+	canEmergencyUnpublish = false,
 	isApp = false,
 }: ShareMenuProps) {
 	const links = useDisclosure();
@@ -92,6 +94,7 @@ export function ShareMenu({
 					notebookId={notebookId}
 					canManage={canManageLinks}
 					canPublish={canPublishLinks}
+					canEmergencyUnpublish={canEmergencyUnpublish}
 					search={location.search}
 					onClose={links.close}
 				/>

@@ -2,8 +2,10 @@ import { gzipSync } from 'fflate';
 import { splitReleaseTarPath } from '@marimo-hub/core/public-releases';
 import { PublicReleaseHostFatalError } from '@marimo-hub/core/ports/public-release-host';
 import type { PublicReleaseBundleFile } from '@marimo-hub/core/ports/public-release-host';
+import { bounded } from './auth';
 
-const RUNTIME_UID = 10001;
+// Root owns the release so the dashboard user (10001) cannot chmod or replace it.
+const RELEASE_OWNER = 0;
 const encoder = new TextEncoder();
 
 export async function sha256Digest(bytes: Uint8Array): Promise<string> {
@@ -24,8 +26,8 @@ function header(path: string, size: number, directory: boolean): Uint8Array {
 	const { name, prefix } = parts;
 	write(0, name);
 	write(100, octal(directory ? 0o555 : 0o444, 8));
-	write(108, octal(RUNTIME_UID, 8));
-	write(116, octal(RUNTIME_UID, 8));
+	write(108, octal(RELEASE_OWNER, 8));
+	write(116, octal(RELEASE_OWNER, 8));
 	write(124, octal(size, 12));
 	write(136, octal(0, 12));
 	write(148, '        ');
@@ -39,8 +41,8 @@ function header(path: string, size: number, directory: boolean): Uint8Array {
 }
 
 /**
- * A reproducible POSIX tar of the release under `release/`: read-only modes, the runtime
- * uid, zero mtimes and sorted entries, so the same bundle always yields the same digest.
+ * A reproducible POSIX tar of the release under `release/`: read-only modes, root
+ * ownership, zero mtimes and sorted entries, so the same bundle always yields the same digest.
  */
 export function releaseTar(files: readonly PublicReleaseBundleFile[]): Uint8Array {
 	const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
@@ -122,17 +124,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface RegistryOptions {
 	/** Google OAuth access token used as the registry credential. */
-	getToken: () => Promise<string>;
+	getToken: (signal?: AbortSignal) => Promise<string>;
 	fetch?: typeof fetch;
 	timeoutMs?: number;
 }
 
+/** Docker token scopes: reads of the base need only pull; the release repository needs push. */
+export const pullScope = (name: string) => `repository:${name}:pull`;
+export const pushScope = (name: string) => `repository:${name}:pull,push`;
+
+const MAX_REDIRECTS = 5;
+
 /**
  * Minimal OCI distribution client: Docker bearer-token auth, manifest reads through an
- * image index, blob upload and cross-repository mount, and manifest push.
+ * image index, blob upload and cross-repository mount, and manifest push. Credentials go
+ * only to the registry origin: token realms and upload locations elsewhere are refused,
+ * and blob redirects to storage are followed without the Authorization header.
  */
 export class RegistryClient {
 	private readonly fetchImpl: typeof fetch;
+	private readonly origin: string;
 	private readonly tokens = new Map<string, string>();
 	private readonly configs = new Map<string, ImageConfig>();
 
@@ -141,24 +152,41 @@ export class RegistryClient {
 		private readonly options: RegistryOptions,
 	) {
 		this.fetchImpl = options.fetch ?? fetch;
+		this.origin = `https://${host}`;
 	}
 
-	private url(path: string) {
-		return path.startsWith('https://') || path.startsWith('http://')
-			? path
-			: `https://${this.host}/v2/${path}`;
+	private url(path: string): URL {
+		const url = /^https?:\/\//.test(path) ? new URL(path) : new URL(`${this.origin}/v2/${path}`);
+		if (url.origin !== this.origin)
+			throw new Error(`Refusing to send registry credentials outside ${this.origin}`);
+		return url;
 	}
 
-	private async registryToken(challenge: string, scope: string): Promise<string> {
+	private signal(signal?: AbortSignal) {
+		return bounded(signal, this.options.timeoutMs ?? 60_000);
+	}
+
+	private async registryToken(
+		challenge: string,
+		scopes: readonly string[],
+		signal?: AbortSignal,
+	): Promise<string> {
 		const params = Object.fromEntries(
 			[...challenge.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]),
 		);
 		if (!params.realm) throw new Error('Registry sent no token realm');
+		// Artifact Registry issues tokens from its own host; the Google token must not go elsewhere.
 		const url = new URL(params.realm);
+		if (url.origin !== this.origin)
+			throw new Error(`Registry token realm must be on ${this.origin}`);
 		if (params.service) url.searchParams.set('service', params.service);
-		url.searchParams.set('scope', scope);
-		const basic = btoa(`oauth2accesstoken:${await this.options.getToken()}`);
-		const response = await this.fetchImpl(url, { headers: { Authorization: `Basic ${basic}` } });
+		for (const scope of scopes) url.searchParams.append('scope', scope);
+		const basic = btoa(`oauth2accesstoken:${await this.options.getToken(signal)}`);
+		const response = await this.fetchImpl(url, {
+			headers: { Authorization: `Basic ${basic}` },
+			redirect: 'error',
+			signal: this.signal(signal),
+		});
 		if (!response.ok) throw new Error(`Registry token request failed: ${response.status}`);
 		const body: unknown = await response.json();
 		const token = isRecord(body) ? (body.token ?? body.access_token) : undefined;
@@ -166,29 +194,45 @@ export class RegistryClient {
 		return token;
 	}
 
+	/**
+	 * Send one request. GET and HEAD follow redirects, keeping credentials only while they
+	 * stay on the registry origin; other methods never follow.
+	 */
+	private async send(url: URL, init: RequestInit, token?: string): Promise<Response> {
+		const headers = new Headers(init.headers);
+		if (token) headers.set('Authorization', `Bearer ${token}`);
+		const signal = this.signal(init.signal ?? undefined);
+		const method = init.method ?? 'GET';
+		let response = await this.fetchImpl(url, { ...init, headers, redirect: 'manual', signal });
+		let current = url;
+		for (let hops = 0; response.status >= 300 && response.status < 400; hops++) {
+			const location = response.headers.get('location');
+			if (!location || (method !== 'GET' && method !== 'HEAD')) break;
+			if (hops >= MAX_REDIRECTS) throw new Error('Registry redirected too many times');
+			const next = new URL(location, current);
+			if (next.protocol !== 'https:') throw new Error('Registry redirected to a non-HTTPS URL');
+			if (next.origin !== this.origin) headers.delete('Authorization');
+			await response.body?.cancel();
+			response = await this.fetchImpl(next, { method, headers, redirect: 'manual', signal });
+			current = next;
+		}
+		return response;
+	}
+
 	async request(
 		path: string,
-		repository: string,
+		scopes: readonly string[],
 		init: RequestInit & { signal?: AbortSignal } = {},
 	): Promise<Response> {
-		const scope = `repository:${repository}:pull,push`;
-		const send = (token?: string) => {
-			const headers = new Headers(init.headers);
-			if (token) headers.set('Authorization', `Bearer ${token}`);
-			const timeout = AbortSignal.timeout(this.options.timeoutMs ?? 60_000);
-			return this.fetchImpl(this.url(path), {
-				...init,
-				headers,
-				redirect: 'follow',
-				signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
-			});
-		};
-		let response = await send(this.tokens.get(scope));
+		const url = this.url(path);
+		const key = scopes.join(' ');
+		let response = await this.send(url, init, this.tokens.get(key));
 		if (response.status === 401) {
 			const challenge = response.headers.get('www-authenticate') ?? '';
-			const token = await this.registryToken(challenge, scope);
-			this.tokens.set(scope, token);
-			response = await send(token);
+			await response.body?.cancel();
+			const token = await this.registryToken(challenge, scopes, init.signal);
+			this.tokens.set(key, token);
+			response = await this.send(url, init, token);
 		}
 		return response;
 	}
@@ -205,7 +249,7 @@ export class RegistryClient {
 		signal?: AbortSignal,
 	): Promise<{ manifest: ImageManifest; mediaType: string }> {
 		const response = await this.expectOk(
-			await this.request(`${name}/manifests/${digest}`, name, {
+			await this.request(`${name}/manifests/${digest}`, [pullScope(name)], {
 				headers: { Accept: Object.values(MANIFEST_TYPES).join(', ') },
 				signal,
 			}),
@@ -241,7 +285,7 @@ export class RegistryClient {
 		const cached = this.configs.get(digest);
 		if (cached) return cached;
 		const response = await this.expectOk(
-			await this.request(`${name}/blobs/${digest}`, name, { signal }),
+			await this.request(`${name}/blobs/${digest}`, [pullScope(name)], { signal }),
 			'Reading the base image config',
 		);
 		const bytes = new Uint8Array(await response.arrayBuffer());
@@ -255,7 +299,7 @@ export class RegistryClient {
 	}
 
 	async hasBlob(name: string, digest: string, signal?: AbortSignal): Promise<boolean> {
-		const response = await this.request(`${name}/blobs/${digest}`, name, {
+		const response = await this.request(`${name}/blobs/${digest}`, [pushScope(name)], {
 			method: 'HEAD',
 			signal,
 		});
@@ -268,7 +312,7 @@ export class RegistryClient {
 		const digest = await sha256Digest(bytes);
 		if (await this.hasBlob(name, digest, signal)) return digest;
 		const start = await this.expectOk(
-			await this.request(`${name}/blobs/uploads/`, name, { method: 'POST', signal }),
+			await this.request(`${name}/blobs/uploads/`, [pushScope(name)], { method: 'POST', signal }),
 			'Starting a blob upload',
 		);
 		const location = start.headers.get('location');
@@ -276,7 +320,7 @@ export class RegistryClient {
 		const upload = new URL(location, `https://${this.host}`);
 		upload.searchParams.set('digest', digest);
 		await this.expectOk(
-			await this.request(upload.toString(), name, {
+			await this.request(upload.toString(), [pushScope(name)], {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/octet-stream' },
 				body: Uint8Array.from(bytes),
@@ -292,7 +336,7 @@ export class RegistryClient {
 		if (name === from || (await this.hasBlob(name, digest, signal))) return;
 		const mount = await this.request(
 			`${name}/blobs/uploads/?mount=${encodeURIComponent(digest)}&from=${encodeURIComponent(from)}`,
-			name,
+			[pushScope(name), pullScope(from)],
 			{ method: 'POST', signal },
 		);
 		if (mount.status === 201 || (await this.hasBlob(name, digest, signal))) return;
@@ -312,7 +356,7 @@ export class RegistryClient {
 		const bytes = encoder.encode(JSON.stringify(manifest));
 		const digest = await sha256Digest(bytes);
 		await this.expectOk(
-			await this.request(`${name}/manifests/${tag}`, name, {
+			await this.request(`${name}/manifests/${tag}`, [pushScope(name)], {
 				method: 'PUT',
 				headers: { 'Content-Type': mediaType },
 				body: bytes,

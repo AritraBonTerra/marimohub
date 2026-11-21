@@ -1259,7 +1259,10 @@ export interface paths {
 		/** List notebook app links */
 		get: operations['deep-links.list'];
 		put?: never;
-		/** Register a globally unique app slug */
+		/**
+		 * Register a globally unique app slug
+		 * @description With `publication`, attaches or disconnects a legacy manual release URL instead. Both need a browser session as the project owner and are audited. Attaching also needs an unlabeled notebook and an approved non-managed release URL, and is refused while managed publishing is enabled. Disconnecting (`origin: null`) only clears a legacy URL, never a managed release.
+		 */
 		post: operations['deep-links.register'];
 		delete?: never;
 		options?: never;
@@ -1297,7 +1300,7 @@ export interface paths {
 		};
 		/**
 		 * List workspace files that can be approved for a public release
-		 * @description Hidden files, generated caches, the notebook entrypoint and `pyproject.toml` are never listed. Only photos under `public/` are web-served; other files are readable from Python only.
+		 * @description Hidden files, generated caches, the notebook entrypoint and `pyproject.toml` are never listed. Only photos under `public/` are web-served; other files are readable from Python only. Git-synced notebooks list the files saved with `version_id`; other notebooks list the current workspace files, and publishing freezes the bytes that match the approved hashes. `truncated` is true when only a bounded preview of the workspace is listed.
 		 */
 		get: operations['public-releases.assets'];
 		put?: never;
@@ -1319,7 +1322,7 @@ export interface paths {
 		put?: never;
 		/**
 		 * Stop a public dashboard
-		 * @description Clears the app link redirect immediately. Returns 200 once the host confirms the direct release URL refuses anonymous visitors, or 202 while revocation continues in the background.
+		 * @description Clears the app link redirect immediately. Returns 200 once the host confirms the direct release URL refuses anonymous visitors, or 202 while revocation continues in the background. The project owner can stop the current or pending release of the link; a hub super admin can do the same as an audited emergency action without being able to publish.
 		 */
 		post: operations['public-releases.unpublish'];
 		delete?: never;
@@ -15090,6 +15093,7 @@ export interface operations {
 								/** @enum {string} */
 								reason?: 'exceeds_max_file_bytes';
 							}[];
+							truncated?: boolean;
 						};
 					};
 				};

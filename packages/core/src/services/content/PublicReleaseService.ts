@@ -3,7 +3,7 @@ import { parse as parseToml } from 'smol-toml';
 import type { Bucket } from '../../ports/bucket';
 import type { PublicReleaseBundleFile, PublicReleaseHost } from '../../ports/publicReleaseHost';
 import { PublicReleaseHostFatalError } from '../../ports/publicReleaseHost';
-import type { DeepLinkTarget } from '../../deepLinks';
+import type { DeepLink, DeepLinkTarget } from '../../deepLinks';
 import {
 	ConflictError,
 	ForbiddenError,
@@ -15,7 +15,6 @@ import { SYSTEM_ACTOR, VersionId } from '../../ids';
 import type { NotebookId, ProjectId, UserId } from '../../ids';
 import { paths } from '../../paths';
 import { readStored } from '../../schema';
-import { ulidString } from '../../stringFormats';
 import { sha256Hex } from '../../internal/sha256';
 import { logEvent } from '../../logs';
 import { logOperationalError } from '../../operationalLog';
@@ -34,7 +33,7 @@ import {
 	isEligibleAssetPath,
 	normalizeApprovedAssetPath,
 	normalizePackageName,
-	PUBLIC_RELEASE_SERVICE_PREFIX,
+	isManagedPublicReleaseOrigin,
 	PublicReleaseHeadSchema,
 	PublicReleaseLiveIndexSchema,
 	PublicReleaseRecordSchema,
@@ -57,19 +56,21 @@ import type { CatalogService } from '../catalog/CatalogService';
 import type { EventService } from '../catalog/EventService';
 
 const LEASE_MS = 90_000;
-const ReleaseIdSchema = ulidString();
 const PUBLISH_DEADLINE_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
 const SWEEP_INTERVAL_MS = 60_000;
 const MAX_CANDIDATES = 500;
+const MAX_PREVIEW_OBJECTS = 1_000;
 const MAX_STEPS_PER_ADVANCE = 4;
+const RECONCILE_CONCURRENCY = 3;
+const MAX_NOTEBOOK_BYTES = 10 * 1024 * 1024;
 
 export interface PublicReleaseServiceDeps {
 	bucket: Bucket;
 	host: PublicReleaseHost;
-	deepLinks: Pick<DeepLinkService, 'resolve' | 'setPublicOrigin' | 'clearPublicOrigin' | 'list'>;
-	notebooks: Pick<NotebookService, 'getNotebook' | 'getVersion'>;
+	deepLinks: Pick<DeepLinkService, 'resolve' | 'clearPublicOrigin' | 'list'>;
+	notebooks: Pick<NotebookService, 'getNotebookSource' | 'getNotebookMeta' | 'getVersion'>;
 	projects: Pick<ProjectService, 'getProject'>;
 	catalog: Pick<CatalogService, 'getCurrentSnapshot'>;
 	events: Pick<EventService, 'append'>;
@@ -127,8 +128,13 @@ function sanitizedError(error: unknown): { code: string; message: string } {
 			: error instanceof Error && error.name === 'AbortError'
 				? 'timeout'
 				: 'host_error';
-	const message = error instanceof Error ? error.message : 'Unexpected publishing error';
-	return { code, message: message.slice(0, 300) };
+	const message =
+		error instanceof PublicReleaseHostFatalError
+			? error.message.slice(0, 300)
+			: code === 'timeout'
+				? 'The publishing operation timed out'
+				: 'The publishing service could not complete the operation';
+	return { code, message };
 }
 
 /** PEP 723 inline dependencies, or an empty list when the notebook declares none. */
@@ -159,6 +165,33 @@ function dependencyList(toml: string, pick: (table: Record<string, unknown>) => 
 	return value as string[];
 }
 
+export async function assertPublicReleaseTarget(
+	deps: {
+		projects: PublicReleaseServiceDeps['projects'];
+		notebooks: Pick<NotebookService, 'getNotebookMeta'>;
+		catalog: PublicReleaseServiceDeps['catalog'];
+	},
+	target: DeepLinkTarget,
+) {
+	const [project, notebook, snapshot] = await Promise.all([
+		deps.projects.getProject(target.project_id, { consistency: 'fresh' }),
+		deps.notebooks.getNotebookMeta(target.project_id, target.notebook_id, { consistency: 'fresh' }),
+		deps.catalog.getCurrentSnapshot(),
+	]);
+	if (project.status === 'deleted' || notebook.status === 'deleted')
+		throw new NotFoundError('Notebook not found');
+	const entry = snapshot.projects.find((p) => p.id === target.project_id);
+	const notebookEntry = entry?.notebooks.find((n) => n.id === target.notebook_id);
+	if (
+		project.security_labels ||
+		notebook.security_labels ||
+		entry?.security_labels_pending ||
+		notebookEntry?.security_labels_pending
+	) {
+		throw new ForbiddenError('Notebooks with security labels cannot be published publicly');
+	}
+}
+
 /**
  * Owns the release records, registration heads and live release index.
  * Publishing freezes exact bytes, and a leased reconciler
@@ -174,6 +207,7 @@ export class PublicReleaseService {
 	private readonly now: () => number;
 	private readonly fenceMarginMs: number;
 	private lastSweepAt = 0;
+	private tickOffset = 0;
 
 	constructor(deps: PublicReleaseServiceDeps) {
 		this.deps = deps;
@@ -195,21 +229,53 @@ export class PublicReleaseService {
 		return (await this.read(releaseId))?.record ?? null;
 	}
 
-	/** A withdrawal takes precedence even if another worker still writes the link's origin. */
-	async canRedirect(registrationId: string, origin: string): Promise<boolean> {
-		const prefix = `https://${PUBLIC_RELEASE_SERVICE_PREFIX}`;
-		if (!origin.startsWith(prefix) || !origin.endsWith(this.host.hostSuffix)) return false;
-		const id = origin.slice(prefix.length, -this.host.hostSuffix.length).toUpperCase();
-		// Older manual origins have service names outside the managed ULID namespace.
-		if (!ReleaseIdSchema.safeParse(id).success) return true;
-		const release = await this.getRelease(id);
-		// While exposing, the link points here only after the anonymous probes passed.
-		return (
-			release?.registration_id === registrationId &&
-			release.origin === origin &&
-			!release.withdraw_requested &&
-			(release.state === 'exposing' || release.state === 'active')
-		);
+	/**
+	 * The registration head selects the only managed release allowed to serve the app link.
+	 * Undefined means no managed dashboard has activated, so the legacy setting still applies.
+	 */
+	async resolveManagedOrigin(
+		link: Pick<DeepLink, 'registration_id' | 'target'>,
+	): Promise<string | null | undefined> {
+		const head = (await this.readHead(link.registration_id))?.head;
+		if (!head?.active_release_id) return head?.managed_activated ? null : undefined;
+		if (
+			head.withdrawing_release_id === head.active_release_id ||
+			!sameTarget(head.target, link.target)
+		)
+			return null;
+		const release = await this.getRelease(head.active_release_id);
+		if (
+			release?.registration_id !== link.registration_id ||
+			!sameTarget(release.target, link.target) ||
+			release.withdraw_requested ||
+			release.state !== 'active' ||
+			release.origin !==
+				deriveDeterministicOrigin(
+					publicReleaseServiceName(release.release_id),
+					this.host.hostSuffix,
+				)
+		)
+			return null;
+		return release.origin;
+	}
+
+	async resolvePublicOrigin(
+		link: Pick<DeepLink, 'registration_id' | 'target'>,
+		legacyOrigin: string | null | undefined,
+	): Promise<string | null> {
+		const managedOrigin = await this.resolveManagedOrigin(link);
+		const origin = managedOrigin === undefined ? legacyOrigin : managedOrigin;
+		if (!origin) return null;
+		// A stale pointer written by an older server cannot reactivate a managed release.
+		if (managedOrigin === undefined && isManagedPublicReleaseOrigin(origin, this.host.hostSuffix))
+			return null;
+		try {
+			await assertPublicReleaseTarget(this.deps, link.target);
+		} catch (error) {
+			if (error instanceof ForbiddenError || error instanceof NotFoundError) return null;
+			throw error;
+		}
+		return origin;
 	}
 
 	private async read(releaseId: string): Promise<Stored | null> {
@@ -397,46 +463,31 @@ export class PublicReleaseService {
 
 	// --- publish ------------------------------------------------------------
 
-	private async assertPublishable(target: DeepLinkTarget) {
-		const [project, notebook, snapshot] = await Promise.all([
-			this.deps.projects.getProject(target.project_id),
-			this.deps.notebooks.getNotebook(target.project_id, target.notebook_id),
-			this.deps.catalog.getCurrentSnapshot(),
-		]);
-		if (project.status === 'deleted' || notebook.meta.status === 'deleted')
-			throw new NotFoundError('Notebook not found');
-		const entry = snapshot.projects.find((p) => p.id === target.project_id);
-		const notebookEntry = entry?.notebooks.find((n) => n.id === target.notebook_id);
-		if (
-			project.security_labels ||
-			notebook.meta.security_labels ||
-			entry?.security_labels_pending ||
-			notebookEntry?.security_labels_pending
-		) {
-			throw new ForbiddenError('Notebooks with security labels cannot be published publicly');
-		}
-		return notebook;
-	}
-
 	private async sourceLayout(projectId: ProjectId, notebookId: NotebookId, versionId: string) {
 		if (!VersionId.is(versionId)) throw new NotFoundError(`Version ${versionId} not found`);
-		const notebook = await this.assertPublishable({
+		await assertPublicReleaseTarget(this.deps, {
 			kind: 'app',
 			project_id: projectId,
 			notebook_id: notebookId,
 		});
-		// Rejects versions a local publication never accepted.
-		await this.deps.notebooks.getVersion(projectId, notebookId, versionId);
+		const source = await this.deps.notebooks.getNotebookSource(projectId, notebookId);
 		const nb = paths.project(projectId).notebook(notebookId);
 		const version = nb.version(versionId);
-		const synced = remoteWorkspaceEntry(notebook.source);
-		const entrypoint = synced ?? workspaceSourcePolicy(notebook.source).entryNotebook;
+		const synced = remoteWorkspaceEntry(source);
+		const entrypoint = synced ?? workspaceSourcePolicy(source).entryNotebook;
 		if (!isArchiveableReleasePath(entrypoint))
 			throw new ValidationError('The notebook path is too long for public publishing');
+		const codeKey = synced ? version.workspaceFile(synced) : version.code;
+		const code = await this.bucket.head(codeKey);
+		if (!code) throw new NotFoundError(`Version ${versionId} not found`);
+		if (code.size > MAX_NOTEBOOK_BYTES)
+			throw new ValidationError('The saved notebook exceeds the 10 MiB publishing limit');
+		// Validates the saved version, including the local publication's committed version list.
+		await this.deps.notebooks.getVersion(projectId, notebookId, versionId);
 		return {
 			versionId,
 			entrypoint,
-			codeKey: synced ? version.workspaceFile(synced) : version.code,
+			codeKey,
 			depsKey: synced ? version.workspaceFile('pyproject.toml') : version.deps,
 			// Synced notebooks pin assets to the version; local notebooks only have the live mirror.
 			assetPrefix: synced ? version.workspacePrefix : nb.workspacePrefix,
@@ -445,15 +496,28 @@ export class PublicReleaseService {
 
 	async listAssetCandidates(projectId: ProjectId, notebookId: NotebookId, versionId: string) {
 		const layout = await this.sourceLayout(projectId, notebookId, versionId);
-		const objects = (await listAllObjects(this.bucket, layout.assetPrefix))
+		const page = await this.bucket.list({ prefix: layout.assetPrefix, limit: MAX_PREVIEW_OBJECTS });
+		let truncated = page.truncated;
+		let remainingBytes = Math.max(this.limits.maxAssetBytes, this.limits.maxTotalAssetBytes);
+		const candidates = page.objects
 			.map((object) => ({ ...object, path: object.key.slice(layout.assetPrefix.length) }))
 			.filter(
 				(object) =>
 					!isWorkspaceDirectoryMarkerPath(object.path) &&
 					isEligibleAssetPath(object.path, layout.entrypoint),
 			)
-			.sort((a, b) => a.path.localeCompare(b.path))
-			.slice(0, MAX_CANDIDATES);
+			.sort((a, b) => a.path.localeCompare(b.path));
+		const objects = candidates.slice(0, MAX_CANDIDATES).filter((object) => {
+			if (object.size > this.limits.maxAssetBytes) return true; // The UI shows it disabled.
+			if (object.size > remainingBytes) {
+				truncated = true;
+				return false;
+			}
+			remainingBytes -= object.size;
+			return true;
+		});
+		truncated ||= candidates.length > MAX_CANDIDATES;
+
 		const assets = await mapWithConcurrency(
 			objects,
 			4,
@@ -469,7 +533,7 @@ export class PublicReleaseService {
 						reason: 'exceeds_max_file_bytes',
 					};
 				const body = await this.bucket.get(object.key);
-				if (!body) return null;
+				if (!body || body.size !== object.size) return null;
 				const bytes = await body.bytes();
 				return {
 					path: object.path,
@@ -484,6 +548,7 @@ export class PublicReleaseService {
 			version_id: layout.versionId,
 			entrypoint: layout.entrypoint,
 			assets: assets.filter((asset) => asset !== null),
+			truncated: truncated || assets.includes(null),
 		};
 	}
 
@@ -551,6 +616,8 @@ export class PublicReleaseService {
 
 		const codeObject = await this.bucket.get(layout.codeKey);
 		if (!codeObject) throw new NotFoundError(`Version ${input.versionId} not found`);
+		if (codeObject.size > MAX_NOTEBOOK_BYTES)
+			throw new ValidationError('The saved notebook exceeds the 10 MiB publishing limit');
 		const code = await codeObject.bytes();
 		await this.assertDependenciesInstalled(new TextDecoder().decode(code), layout.depsKey);
 
@@ -561,7 +628,7 @@ export class PublicReleaseService {
 		const assets: PublicReleaseAsset[] = [];
 		for (const asset of input.assets) {
 			const object = await this.bucket.get(`${layout.assetPrefix}${asset.path}`);
-			const bytes = object ? await object.bytes() : null;
+			const bytes = object?.size === asset.size_bytes ? await object.bytes() : null;
 			if (
 				!bytes ||
 				bytes.byteLength !== asset.size_bytes ||
@@ -589,10 +656,6 @@ export class PublicReleaseService {
 			bytes: manifestBytes,
 			sha256: await sha256Hex(manifestBytes),
 		});
-		await mapWithConcurrency(files, 4, (file) =>
-			this.bucket.put(paths.publicReleaseBundleFile(releaseId, file.path), file.bytes),
-		);
-
 		const serviceName = publicReleaseServiceName(releaseId);
 		const now = this.now();
 		const iso = new Date(now).toISOString();
@@ -609,6 +672,7 @@ export class PublicReleaseService {
 			service_name: serviceName,
 			origin: deriveDeterministicOrigin(serviceName, this.host.hostSuffix),
 			state: 'publishing',
+			staging: true,
 			withdraw_requested: false,
 			attempt: 0,
 			deadline_at: now + PUBLISH_DEADLINE_MS,
@@ -621,24 +685,32 @@ export class PublicReleaseService {
 		});
 
 		const staleCandidates: string[] = [];
-		let reserved = false;
+		let assigningHead = false;
 		try {
 			await this.updateLiveIndex(releaseId, true);
-			reserved = true;
+			const failures = await mapWithConcurrency(files, 4, async (file) => {
+				try {
+					await this.bucket.put(paths.publicReleaseBundleFile(releaseId, file.path), file.bytes);
+					return null;
+				} catch (error) {
+					return { error };
+				}
+			});
+			const failure = failures.find((result) => result !== null);
+			if (failure) throw failure.error;
+
+			const current = await this.read(releaseId);
+			if (!current?.record.staging || current.record.withdraw_requested)
+				throw new ConflictError('Publishing stopped before the files were saved');
+			const ready = await this.write(current, { ...current.record, staging: undefined });
+			if (!ready) throw new ConflictError('Public release changed concurrently; try again');
+
 			const pending = (await this.readHead(link.registration_id))?.head.pending_release_id;
 			if (pending && (await this.isStalePending(pending))) staleCandidates.push(pending);
+			assigningHead = true;
 			await this.updateHead(
 				link.registration_id,
-				() => ({
-					schema_version: 1,
-					registration_id: link.registration_id,
-					slug: link.slug,
-					target,
-					active_release_id: null,
-					pending_release_id: null,
-					last_release_id: null,
-					updated_at: iso,
-				}),
+				() => this.emptyHead(record),
 				(head) => {
 					if (head.withdrawing_release_id)
 						throw new ConflictError('Unpublishing is already in progress for this link');
@@ -647,19 +719,21 @@ export class PublicReleaseService {
 					return { ...head, slug: link.slug, target, pending_release_id: releaseId };
 				},
 			);
+			for (const stale of staleCandidates) await this.abandon(stale);
+			await this.event('publish_requested', ready.record, input.actor, {
+				version_id: input.versionId,
+			});
+			return ready.record;
 		} catch (error) {
-			if (!reserved || error instanceof ConflictError) {
+			if (!assigningHead || error instanceof ConflictError) {
 				await this.abandon(releaseId);
-				if (reserved) await this.updateLiveIndex(releaseId, false);
+				await this.updateLiveIndex(releaseId, false);
 			} else {
 				// The head update might have committed. Reconcile withdrawal before freeing the slot.
 				await this.requestUnpublish(releaseId, 'publish_failed');
 			}
 			throw error;
 		}
-		for (const stale of staleCandidates) await this.abandon(stale);
-		await this.event('publish_requested', record, input.actor, { version_id: input.versionId });
-		return record;
 	}
 
 	/** Legacy pending records without a reservation never reached the reconciler. */
@@ -701,24 +775,36 @@ export class PublicReleaseService {
 			if (isTerminal(record) || record.state === 'unpublishing') {
 				if (reason === 'user' && record.activated_at) {
 					const head = (await this.readHead(record.registration_id))?.head;
-					const replacement = head?.pending_release_id ?? head?.active_release_id;
-					if (replacement && replacement !== releaseId)
+					if (
+						(head?.pending_release_id || head?.active_release_id) &&
+						head.active_release_id !== releaseId &&
+						head.pending_release_id !== releaseId
+					)
 						throw new ConflictError('The dashboard has changed; refresh before unpublishing');
 				}
 				await this.clearLink(record);
 				return record;
 			}
-			if (reason === 'user' && record.state === 'active') {
+			if (reason !== 'republish_superseded') {
 				await this.updateHead(
 					record.registration_id,
 					() => this.emptyHead(record),
 					(head) => {
-						if (head.pending_release_id && head.pending_release_id !== releaseId)
-							throw new ConflictError('Cancel the replacement before unpublishing this dashboard');
-						if (head.withdrawing_release_id === releaseId) return null;
-						if (head.active_release_id !== releaseId && head.pending_release_id !== releaseId)
+						const isActive = head.active_release_id === releaseId;
+						const isPending = head.pending_release_id === releaseId;
+						if (reason === 'user' && !isActive && !isPending)
 							throw new ConflictError('The dashboard has changed; refresh before unpublishing');
-						return { ...head, withdrawing_release_id: releaseId };
+						if (reason === 'user' && isActive && head.pending_release_id)
+							throw new ConflictError('Cancel the replacement before unpublishing this dashboard');
+						if (isActive)
+							return {
+								...head,
+								managed_activated: true,
+								withdrawing_release_id: releaseId,
+							};
+						return isPending && !head.withdrawing_release_id
+							? { ...head, withdrawing_release_id: releaseId }
+							: null;
 					},
 				);
 			}
@@ -731,7 +817,10 @@ export class PublicReleaseService {
 				withdraw_requested: true,
 				withdraw_reason: reason,
 				unpublish_requested_at: new Date(now).toISOString(),
-				fenced_until: Math.max(record.fenced_until ?? 0, fence),
+				fenced_until: Math.max(
+					record.fenced_until ?? 0,
+					record.staging ? record.deadline_at + this.fenceMarginMs : fence,
+				),
 				lease: undefined,
 				next_retry_at: undefined,
 			});
@@ -758,13 +847,25 @@ export class PublicReleaseService {
 		reason: PublicReleaseWithdrawReason,
 		actor: UserId = SYSTEM_ACTOR,
 	): Promise<number> {
-		const matching = (await this.liveReleases()).filter(
-			(record) =>
-				record.target.project_id === target.projectId &&
-				(target.notebookId === undefined || record.target.notebook_id === target.notebookId),
-		);
-		for (const record of matching) await this.requestUnpublish(record.release_id, reason, actor);
-		return matching.length;
+		const { ids } = await this.readLiveIndex();
+		const withdrawn = await mapWithConcurrency(ids, RECONCILE_CONCURRENCY, async (id) => {
+			try {
+				const record = await this.getRelease(id);
+				if (
+					!record ||
+					isTerminal(record) ||
+					record.target.project_id !== target.projectId ||
+					(target.notebookId !== undefined && record.target.notebook_id !== target.notebookId)
+				)
+					return false;
+				await this.requestUnpublish(id, reason, actor);
+				return true;
+			} catch (error) {
+				logOperationalError('public_release_target_withdraw_failed', { release_id: id }, error);
+				return false;
+			}
+		});
+		return withdrawn.filter(Boolean).length;
 	}
 
 	// --- reconciliation -----------------------------------------------------
@@ -774,11 +875,38 @@ export class PublicReleaseService {
 		return (await this.readLiveIndex()).ids.length > 0;
 	}
 
-	/** One reconciler pass: advance live releases, then periodically sweep host-side orphans. */
+	/** Run withdrawals first; rotate the order so later releases get time in each budget. */
 	async reconcileTick(holder: string, signal?: AbortSignal): Promise<void> {
-		for (const id of (await this.readLiveIndex()).ids) {
+		const { ids } = await this.readLiveIndex();
+		const offset = ids.length > 0 ? this.tickOffset++ % ids.length : 0;
+		const ordered = [...ids.slice(offset), ...ids.slice(0, offset)];
+		const states = await mapWithConcurrency(ordered, RECONCILE_CONCURRENCY, async (id) => {
+			if (signal?.aborted) return null;
+			try {
+				return { id, state: (await this.getRelease(id))?.state };
+			} catch (error) {
+				if (!signal?.aborted)
+					logOperationalError('public_release_reconcile_read_failed', { release_id: id }, error);
+				return null;
+			}
+		});
+		signal?.throwIfAborted();
+		const entries = states.filter((entry) => entry !== null);
+		for (const withdrawals of [true, false]) {
+			await mapWithConcurrency(
+				entries.filter(({ state }) => (state === 'unpublishing') === withdrawals),
+				RECONCILE_CONCURRENCY,
+				async ({ id }) => {
+					if (signal?.aborted) return;
+					try {
+						if (!(await this.advance(id, holder, signal))) await this.updateLiveIndex(id, false);
+					} catch (error) {
+						if (!signal?.aborted)
+							logOperationalError('public_release_reconcile_failed', { release_id: id }, error);
+					}
+				},
+			);
 			signal?.throwIfAborted();
-			if (!(await this.advance(id, holder, signal))) await this.updateLiveIndex(id, false);
 		}
 		if (this.now() - this.lastSweepAt >= SWEEP_INTERVAL_MS) {
 			await this.sweepHost(signal);
@@ -787,37 +915,44 @@ export class PublicReleaseService {
 	}
 
 	private async sweepHost(signal?: AbortSignal): Promise<void> {
-		for (const service of await this.host.listManagedServices(signal)) {
-			const releaseId = service.releaseId?.toUpperCase();
-			const record = releaseId ? await this.getRelease(releaseId) : null;
-			if (!record || isTerminal(record)) {
-				logEvent({
-					level: 'warn',
-					event: 'public_release_orphan_service',
-					service_name: service.serviceName,
-					public_invoker: service.publicInvoker,
-				});
-				await this.host.revoke({
-					releaseId: releaseId ?? '',
-					serviceName: service.serviceName,
-					signal,
-				});
-			} else if (
-				service.publicInvoker &&
-				record.state !== 'exposing' &&
-				record.state !== 'active' &&
-				record.state !== 'unpublishing'
-			) {
-				logEvent({
-					level: 'error',
-					event: 'public_release_unexpected_public_invoker',
-					service_name: service.serviceName,
-					release_id: record.release_id,
-					state: record.state,
-				});
-				await this.requestUnpublish(record.release_id, 'publish_failed');
+		const services = await this.host.listManagedServices(signal);
+		await mapWithConcurrency(services, RECONCILE_CONCURRENCY, async (service) => {
+			if (signal?.aborted) return;
+			try {
+				const releaseId = service.releaseId?.toUpperCase();
+				const record = releaseId ? await this.getRelease(releaseId) : null;
+				if (!record || isTerminal(record)) {
+					logEvent({
+						level: 'warn',
+						event: 'public_release_orphan_service',
+						service_name: service.serviceName,
+						public_invoker: service.publicInvoker,
+					});
+					await this.host.revoke({
+						releaseId: releaseId ?? '',
+						serviceName: service.serviceName,
+						signal,
+					});
+				} else if (service.publicInvoker && record.state === 'publishing') {
+					logEvent({
+						level: 'error',
+						event: 'public_release_unexpected_public_invoker',
+						service_name: service.serviceName,
+						release_id: record.release_id,
+						state: record.state,
+					});
+					await this.requestUnpublish(record.release_id, 'publish_failed');
+				}
+			} catch (error) {
+				if (!signal?.aborted)
+					logOperationalError(
+						'public_release_sweep_failed',
+						{ service_name: service.serviceName },
+						error,
+					);
 			}
-		}
+		});
+		signal?.throwIfAborted();
 	}
 
 	/**
@@ -829,10 +964,11 @@ export class PublicReleaseService {
 		holder: string,
 		signal?: AbortSignal,
 	): Promise<PublicReleaseRecord | null> {
+		signal?.throwIfAborted();
 		let current = await this.read(releaseId);
 		if (!current) return null;
 		if (isTerminal(current.record)) {
-			await this.finishTerminal(current.record);
+			await this.finishTerminal(current.record, signal);
 			return current.record;
 		}
 		// Active checks make no host calls and every write is ETag-guarded, so they skip the
@@ -843,8 +979,9 @@ export class PublicReleaseService {
 			if (current?.record.state !== 'unpublishing') return current?.record ?? null;
 		}
 		const now = this.now();
-		const { lease, next_retry_at } = current.record;
-		if (lease && lease.until > now && lease.owner !== holder) return current.record;
+		const { lease, next_retry_at, staging, state, deadline_at } = current.record;
+		if (staging && state === 'publishing' && now <= deadline_at) return current.record;
+		if (lease && lease.until > now) return current.record;
 		if (next_retry_at && next_retry_at > now) return current.record;
 		const token = ulid();
 		const until = now + LEASE_MS;
@@ -860,12 +997,15 @@ export class PublicReleaseService {
 		try {
 			let next: Step = current;
 			while (next && steps < MAX_STEPS_PER_ADVANCE) {
+				stepSignal.throwIfAborted();
 				current = next;
 				steps++;
 				next = await this.step(current, stepSignal);
 			}
 			if (next) current = next;
 		} catch (error) {
+			// Preserve the lease on cancellation so withdrawal still fences any late host writes.
+			signal?.throwIfAborted();
 			return this.recordFailure(releaseId, token, error);
 		}
 		const latest = await this.read(releaseId);
@@ -904,11 +1044,16 @@ export class PublicReleaseService {
 				'publish_failed',
 				sanitizedError(error),
 			);
-			if (withdrawn) await this.event('publish_failed', withdrawn.record);
-			return withdrawn?.record ?? record;
+			if (!withdrawn) return record;
+			await this.event('publish_failed', withdrawn.record);
+			return (
+				(await this.write(withdrawn, { ...withdrawn.record, lease: undefined }))?.record ??
+				withdrawn.record
+			);
 		}
 		const attempt = record.attempt + 1;
-		const delay = Math.min(POLL_MS * 2 ** Math.min(attempt, 6), MAX_BACKOFF_MS);
+		const maxBackoff = record.state === 'unpublishing' ? 30_000 : MAX_BACKOFF_MS;
+		const delay = Math.min(POLL_MS * 2 ** Math.min(attempt, 6), maxBackoff);
 		logOperationalError(
 			'public_release_step_failed',
 			{ release_id: releaseId, state: record.state, attempt },
@@ -948,10 +1093,9 @@ export class PublicReleaseService {
 	/** Why a release must be withdrawn, or null while its link, target and labels still allow it. */
 	private async invalidation(
 		record: PublicReleaseRecord,
-		requireOrigin: boolean,
 	): Promise<PublicReleaseWithdrawReason | null> {
 		try {
-			await this.assertPublishable(record.target);
+			await assertPublicReleaseTarget(this.deps, record.target);
 		} catch (error) {
 			if (error instanceof ForbiddenError) return 'security_labeled';
 			if (error instanceof NotFoundError) return 'target_deleted';
@@ -966,7 +1110,6 @@ export class PublicReleaseService {
 		}
 		if (link.registration_id !== record.registration_id || !sameTarget(link.target, record.target))
 			return 'link_changed';
-		if (requireOrigin && link.public_origin !== record.origin) return 'link_changed';
 		return null;
 	}
 
@@ -979,7 +1122,12 @@ export class PublicReleaseService {
 			if (next) await this.event('publish_failed', next.record);
 			return next;
 		}
-		const reason = await this.invalidation(current.record, false);
+		const { record } = current;
+		const head = (await this.readHead(record.registration_id))?.head;
+		if (head?.withdrawing_release_id === record.release_id)
+			return this.withdrawFromStep(current, 'user');
+		if (record.staging || head?.pending_release_id !== record.release_id) return null;
+		const reason = await this.invalidation(record);
 		return reason ? this.withdrawFromStep(current, reason) : 'ok';
 	}
 
@@ -987,8 +1135,6 @@ export class PublicReleaseService {
 		const guard = await this.guardPublishing(current);
 		if (guard !== 'ok') return guard;
 		const { record } = current;
-		const head = await this.readHead(record.registration_id);
-		if (head?.head.pending_release_id !== record.release_id) return null;
 		const result = await this.host.deployPrivate({
 			releaseId: record.release_id,
 			serviceName: record.service_name,
@@ -1032,21 +1178,10 @@ export class PublicReleaseService {
 		});
 		const after = await this.read(record.release_id);
 		if (!after || after.etag !== current.etag) return null;
-		const reason = await this.invalidation(record, false);
+		const reason = await this.invalidation(record);
 		if (reason) return this.withdrawFromStep(after, reason);
-		try {
-			await this.deps.deepLinks.setPublicOrigin(
-				record.slug,
-				record.target,
-				record.registration_id,
-				record.origin,
-			);
-		} catch (error) {
-			if (!(error instanceof NotFoundError)) throw error;
-			return this.withdrawFromStep(after, 'link_changed');
-		}
 		const iso = new Date(this.now()).toISOString();
-		const active = await this.write(after, {
+		return this.write(after, {
 			...record,
 			state: 'active',
 			exposed_at: record.exposed_at ?? iso,
@@ -1054,62 +1189,48 @@ export class PublicReleaseService {
 			attempt: 0,
 			error: undefined,
 		});
-		if (!active) {
-			// A withdrawal won the race after the link swap; undo the swap.
-			const latest = await this.getRelease(record.release_id);
-			if (latest?.withdraw_requested) await this.clearLink(latest);
-			return null;
-		}
-		await this.event('published', active.record);
-		return active;
 	}
 
 	private async stepActive(current: Stored): Promise<Step> {
 		const { record } = current;
+		const reason = await this.invalidation(record);
+		if (reason) return this.withdrawFromStep(current, reason);
+
 		let previous: string | null = null;
-		let superseded = false;
-		let withdrawing = false;
-		await this.updateHead(
+		let activated = false;
+		const result = await this.updateHead(
 			record.registration_id,
 			() => this.emptyHead(record),
 			(head) => {
 				previous = null;
-				superseded = false;
-				withdrawing = head.withdrawing_release_id === record.release_id;
-				if (withdrawing) return null;
-				if (head.pending_release_id === record.release_id) {
-					previous = head.active_release_id === record.release_id ? null : head.active_release_id;
-					return {
-						...head,
-						active_release_id: record.release_id,
-						pending_release_id: null,
-						last_release_id: previous ?? head.last_release_id,
-					};
-				}
-				// Only the pending release may take over the link; any other active one was replaced.
-				if (head.active_release_id !== record.release_id) superseded = true;
-				return null;
+				activated = false;
+				if (head.pending_release_id !== record.release_id || head.withdrawing_release_id)
+					return null;
+				previous = head.active_release_id;
+				activated = true;
+				return {
+					...head,
+					managed_activated: true,
+					active_release_id: record.release_id,
+					pending_release_id: null,
+					last_release_id: previous ?? head.last_release_id,
+				};
 			},
 		);
-		if (withdrawing) {
+		if (result?.withdrawing_release_id === record.release_id) {
 			await this.requestUnpublish(record.release_id, 'user');
 			return null;
 		}
-		if (superseded) {
+		if (result?.active_release_id !== record.release_id) {
 			await this.requestUnpublish(record.release_id, 'republish_superseded');
 			return null;
 		}
-		// Blue/green: the previous release stays live until this one has taken over the link.
+		if (activated) await this.event('published', record);
 		if (previous) await this.requestUnpublish(previous, 'republish_superseded');
-		let latest: Stored = current;
 		if (!record.bundle_cleaned) {
 			await this.deleteBundle(record.release_id);
-			const cleaned = await this.write(current, { ...record, bundle_cleaned: true });
-			if (!cleaned) return null;
-			latest = cleaned;
+			await this.write(current, { ...record, bundle_cleaned: true });
 		}
-		const reason = await this.invalidation(record, true);
-		if (reason) await this.withdrawFromStep(latest, reason);
 		return null;
 	}
 
@@ -1157,7 +1278,7 @@ export class PublicReleaseService {
 			terminal.record.activated_at ? 'unpublished' : 'publish_failed',
 			terminal.record,
 		);
-		await this.finishTerminal(terminal.record);
+		await this.finishTerminal(terminal.record, signal);
 		return null;
 	}
 
@@ -1169,7 +1290,7 @@ export class PublicReleaseService {
 	}
 
 	/** Idempotent cleanup after a terminal transition; safe to repeat after a crash. */
-	private async finishTerminal(record: PublicReleaseRecord): Promise<void> {
+	private async finishTerminal(record: PublicReleaseRecord, signal?: AbortSignal): Promise<void> {
 		await this.updateHead(
 			record.registration_id,
 			() => this.emptyHead(record),
@@ -1193,6 +1314,19 @@ export class PublicReleaseService {
 						},
 		);
 		await this.deleteBundle(record.release_id);
+		if (record.unpublished_at && this.host.markImageRetired) {
+			try {
+				await this.host.markImageRetired(record.release_id, record.image_digest, signal);
+			} catch (error) {
+				signal?.throwIfAborted();
+				// Release capacity even if registry retention needs operator attention.
+				logOperationalError(
+					'public_release_image_retirement_failed',
+					{ release_id: record.release_id },
+					error,
+				);
+			}
+		}
 		await this.updateLiveIndex(record.release_id, false);
 	}
 }

@@ -3,7 +3,7 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import { createServices, paths } from '@marimo-hub/core';
-import type { DeepLink, DeepLinkTarget, ProjectAction } from '@marimo-hub/core';
+import type { DeepLink, DeepLinkTarget, ProjectAction, UserId } from '@marimo-hub/core';
 import { ACTOR, uid, localResourceSecurity, makeSubjectContext } from '@marimo-hub/core/testing';
 import { createInitializedBucket, createTestApi, expectError, expectOk } from '../testing';
 
@@ -91,6 +91,88 @@ describe('App link routes', () => {
 				}),
 			),
 		).toMatchObject({ public_origin: null });
+	});
+
+	it('limits legacy release URLs to owner browser sessions on unlabeled notebooks, with audit', async () => {
+		const link = await createLink();
+		const suffix = '-123.us-west1.run.app';
+		const as = (userId: UserId) =>
+			createTestApi({ bucket: api.bucket, userId, deps: { publicAppReleaseHostSuffix: suffix } });
+		const configured = createTestApi({
+			bucket: api.bucket,
+			deps: { publicAppReleaseHostSuffix: suffix },
+		});
+		const append = vi.spyOn(configured.deps.services.events, 'append');
+		const publish = (origin: string | null) => ({
+			slug: link.slug,
+			publication: { registration_id: link.registration_id, origin },
+		});
+		const origin = `https://marimo-public-sales${suffix}`;
+		await configured.deps.services.projects.addMember(
+			target.project_id,
+			{ user_id: uid('manager') },
+			'manager',
+			ACTOR,
+		);
+		const pat = createTestApi({
+			bucket: api.bucket,
+			subject: { credential: { kind: 'personal-access-token', id: 'tok' } },
+			deps: { publicAppReleaseHostSuffix: suffix },
+		});
+		await expectError(await pat.request('POST', base, publish(origin)), 403);
+		await expectError(await as(uid('manager')).request('POST', base, publish(origin)), 403);
+		// Reserved managed service names never attach as legacy URLs.
+		await expectError(
+			await configured.request(
+				'POST',
+				base,
+				publish(`https://marimo-public-01j00000000000000000000000${suffix}`),
+			),
+			422,
+		);
+		await expectOk(await configured.request('POST', base, publish(origin)));
+		expect(append).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: 'deep_link.public_origin_set',
+				actor: ACTOR,
+				slug: link.slug,
+				registration_id: link.registration_id,
+				origin,
+			}),
+		);
+		// A manager cannot disconnect either; only the owner changes the URL.
+		await expectError(await as(uid('manager')).request('POST', base, publish(null)), 403);
+		await expectError(await pat.request('POST', base, publish(null)), 403);
+
+		const labels = { classification: 'SECRET', compartments: ['finance'] };
+		await configured.deps.services.notebooks.setSecurityLabels(
+			target.project_id,
+			target.notebook_id,
+			labels,
+			ACTOR,
+		);
+		// The owner is cleared to see the labeled notebook, so the refusal is the publish guard.
+		const cleared = createTestApi({
+			bucket: api.bucket,
+			deps: {
+				publicAppReleaseHostSuffix: suffix,
+				resourceSecurity: localResourceSecurity(
+					['UNCLASSIFIED', 'SECRET'],
+					makeSubjectContext({ compartments: ['finance'] }),
+				),
+			},
+		});
+		const clearedAppend = vi.spyOn(cleared.deps.services.events, 'append');
+		expect(
+			(await expectError(await cleared.request('POST', base, publish(origin)), 403)).message,
+		).toContain('security labels');
+		// Labels never block the owner from stopping a release.
+		expect(await expectOk(await cleared.request('POST', base, publish(null)))).toMatchObject({
+			public_origin: null,
+		});
+		expect(clearedAppend).toHaveBeenCalledWith(
+			expect.objectContaining({ event: 'deep_link.public_origin_cleared', actor: ACTOR, origin }),
+		);
 	});
 
 	it.each([

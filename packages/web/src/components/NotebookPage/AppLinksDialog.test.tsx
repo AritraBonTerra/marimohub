@@ -83,6 +83,8 @@ function setup(
 			projectId="proj-1"
 			notebookId="nb-1"
 			canManage={canManage}
+			// Manual release URLs are owner-only; this fixture's manager is also the owner.
+			canPublish={canManage}
 			search={search}
 			onClose={() => {}}
 		/>,

@@ -12,14 +12,21 @@ import { TextField } from '@/components/ui/TextField';
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard';
 import { withBasePath } from '@/lib/basePath';
 import { shareableNotebookQuery } from '@/lib/notebookUrls';
-import { PublicReleaseBadge, PublicReleasePanel } from './PublicReleasePanel';
+import {
+	EmergencyUnpublishPanel,
+	PublicReleaseBadge,
+	PublicReleasePanel,
+} from './PublicReleasePanel';
 import { publicLinkStatus } from './publicReleaseStatus';
 
 interface AppLinksDialogProps {
 	projectId: string;
 	notebookId: string;
 	canManage: boolean;
+	/** Project owner: publishes managed releases and attaches or disconnects legacy URLs. */
 	canPublish?: boolean;
+	/** Hub super admin: audited emergency unpublish without a publish grant. */
+	canEmergencyUnpublish?: boolean;
 	search?: string;
 	onClose: () => void;
 }
@@ -29,6 +36,7 @@ export function AppLinksDialog({
 	notebookId,
 	canManage,
 	canPublish = false,
+	canEmergencyUnpublish = false,
 	search = '',
 	onClose,
 }: AppLinksDialogProps) {
@@ -51,6 +59,22 @@ export function AppLinksDialog({
 	const releasesFor = (registrationId: string) =>
 		releases.data?.find((entry) => entry.registration_id === registrationId);
 	const [managing, setManaging] = useState<{ slug: string; registration_id: string } | null>(null);
+	const [emergency, setEmergency] = useState<{ slug: string; registration_id: string } | null>(
+		null,
+	);
+	// `public_origin` reports the managed head's origin for links with managed history, so a
+	// URL is legacy only once the release list has loaded and none of its releases match it.
+	const legacyOrigin = (link: { registration_id: string; public_origin?: string | null }) =>
+		releases.isSuccess &&
+		link.public_origin &&
+		!releasesFor(link.registration_id)?.releases.some(
+			(release) => release.origin === link.public_origin,
+		)
+			? link.public_origin
+			: null;
+	const selectedLink = currentLinks?.find(
+		(link) => link.registration_id === selected?.registration_id,
+	);
 	const canonicalSlug = slug.trim().toLowerCase();
 	const valid = DeepLinkSlugSchema.safeParse(canonicalSlug).success;
 	const pending = register.isPending || release.isPending;
@@ -109,7 +133,32 @@ export function AppLinksDialog({
 										: 'Publish'}
 								</Button>
 							)}
-							{canManage && mode === 'manual' && (
+							{!canPublish &&
+								canEmergencyUnpublish &&
+								mode === 'managed' &&
+								publicLinkStatus(releasesFor(link.registration_id)).label && (
+									<Button variant="ghost" onPress={() => setEmergency(link)}>
+										Emergency unpublish…
+									</Button>
+								)}
+							{canPublish && mode === 'managed' && legacyOrigin(link) && (
+								<Button
+									variant="ghost"
+									isDisabled={publication.isPending}
+									onPress={() =>
+										publication.mutate(
+											{
+												slug: link.slug,
+												publication: { registration_id: link.registration_id, origin: null },
+											},
+											{ onSuccess: () => toast.success('Legacy release URL disconnected') },
+										)
+									}
+								>
+									Disconnect legacy URL
+								</Button>
+							)}
+							{canPublish && mode === 'manual' && (
 								<Button
 									variant="ghost"
 									isDisabled={publication.isPending}
@@ -157,7 +206,22 @@ export function AppLinksDialog({
 						onClose={() => setManaging(null)}
 					/>
 				)}
-				{canManage && mode === 'manual' && selected && (
+				{!canPublish && canEmergencyUnpublish && mode === 'managed' && emergency && (
+					<EmergencyUnpublishPanel
+						key={emergency.registration_id}
+						projectId={projectId}
+						notebookId={notebookId}
+						entry={releasesFor(emergency.registration_id)}
+						appPath={`/app/${emergency.slug}`}
+						onClose={() => setEmergency(null)}
+					/>
+				)}
+				{mode === 'managed' && publication.isError && !selected && (
+					<p role="alert" className="text-sm text-destructive">
+						{publication.error.message}
+					</p>
+				)}
+				{canPublish && mode === 'manual' && selected && (
 					<form
 						className="flex flex-col gap-2 rounded-md border p-3"
 						onSubmit={(event) => {
@@ -194,9 +258,7 @@ export function AppLinksDialog({
 							<Button type="submit" isDisabled={!origin.trim() || publication.isPending}>
 								Publish link
 							</Button>
-							{currentLinks?.some(
-								(link) => link.registration_id === selected.registration_id && link.public_origin,
-							) && (
+							{selectedLink?.public_origin && (
 								<Button
 									variant="ghost"
 									isDisabled={publication.isPending}

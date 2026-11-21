@@ -1,8 +1,17 @@
 import type { MiddlewareHandler } from 'hono';
 import { ConfigError } from '@marimo-hub/config';
 import { z } from 'zod';
-import { isApprovedPublicAppOrigin, NotFoundError } from '@marimo-hub/core';
+import {
+	createSlidingWindowBudget,
+	ForbiddenError,
+	isApprovedPublicAppOrigin,
+	isManagedPublicReleaseOrigin,
+	NotFoundError,
+} from '@marimo-hub/core';
+import type { DeepLink } from '@marimo-hub/core';
 import { DeepLinkSlugSchema } from '@marimo-hub/core/deep-link-slug';
+
+const MAX_CONCURRENT_LOOKUPS = 32;
 
 const PublicReleaseSchema = z.strictObject({
 	registration_id: z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
@@ -28,11 +37,19 @@ export function parsePublicAppReleases(value?: string) {
 export function redirectPublicAppLinks(
 	releases: ReturnType<typeof parsePublicAppReleases>,
 	deepLinks: {
-		resolve(slug: string): Promise<{ registration_id: string; public_origin?: string | null }>;
+		resolve(slug: string): Promise<Pick<DeepLink, 'registration_id' | 'target' | 'public_origin'>>;
 	},
 	hostSuffix?: string,
-	managed?: { canRedirect(registrationId: string, origin: string): Promise<boolean> },
+	managed?: {
+		resolvePublicOrigin(
+			link: Pick<DeepLink, 'registration_id' | 'target'>,
+			legacyOrigin: string | null | undefined,
+		): Promise<string | null>;
+	},
+	assertLegacyTarget?: (target: DeepLink['target']) => Promise<unknown>,
 ): MiddlewareHandler {
+	let lookups = 0;
+	const requests = createSlidingWindowBudget<null>({ limit: 300, windowMs: 10_000 });
 	return async (c, next) => {
 		if (c.req.method !== 'GET' && c.req.method !== 'HEAD') return next();
 		const requestPath = new URL(c.req.url).pathname;
@@ -46,24 +63,45 @@ export function redirectPublicAppLinks(
 		const release = releases.get(slug);
 		if (!release && (!hostSuffix || !DeepLinkSlugSchema.safeParse(slug).success)) return next();
 
-		// A slug can be reused after removal. Only its original registration may redirect.
-		let link;
-		try {
-			link = await deepLinks.resolve(slug);
-		} catch (error) {
-			if (!(error instanceof NotFoundError)) throw error;
-			return next();
+		if (!requests.consume(null)) {
+			c.header('Cache-Control', 'no-store');
+			c.header('Retry-After', '10');
+			return c.body(null, 429);
 		}
-		const origin =
-			link.public_origin === undefined
-				? link.registration_id === release?.registration_id
-					? release.origin
-					: undefined
-				: link.public_origin;
+		if (lookups >= MAX_CONCURRENT_LOOKUPS) {
+			c.header('Cache-Control', 'no-store');
+			return c.body(null, 503);
+		}
+		let origin: string | null | undefined;
+		lookups++;
+		try {
+			// A slug can be reused after removal. Only its original registration may redirect.
+			const link = await deepLinks.resolve(slug);
+			const legacyOrigin =
+				link.public_origin === undefined
+					? link.registration_id === release?.registration_id
+						? release.origin
+						: undefined
+					: link.public_origin;
+			const approvedLegacy =
+				link.public_origin && !isApprovedPublicAppOrigin(link.public_origin, hostSuffix)
+					? null
+					: legacyOrigin;
+			if (managed) {
+				origin = await managed.resolvePublicOrigin(link, approvedLegacy);
+			} else if (
+				approvedLegacy &&
+				!(hostSuffix && isManagedPublicReleaseOrigin(approvedLegacy, hostSuffix))
+			) {
+				await assertLegacyTarget?.(link.target);
+				origin = approvedLegacy;
+			}
+		} catch (error) {
+			if (!(error instanceof NotFoundError || error instanceof ForbiddenError)) throw error;
+		} finally {
+			lookups--;
+		}
 		if (!origin) return next();
-		if (link.public_origin && !isApprovedPublicAppOrigin(origin, hostSuffix)) return next();
-		if (link.public_origin && managed && !(await managed.canRedirect(link.registration_id, origin)))
-			return next();
 
 		c.header('Cache-Control', 'no-store');
 		c.header('Referrer-Policy', 'no-referrer');

@@ -62,7 +62,7 @@ export {
 export { HostRetryStore } from './runtime/HostRetryStore';
 export type { HostRetryClaim, HostRetryReply } from './runtime/HostRetryStore';
 export { DeepLinkService } from './content/DeepLinkService';
-export { PublicReleaseService } from './content/PublicReleaseService';
+export { PublicReleaseService, assertPublicReleaseTarget } from './content/PublicReleaseService';
 export type {
 	PublicAppLinkReleases,
 	PublicReleaseAssetCandidate,

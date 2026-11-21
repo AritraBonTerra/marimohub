@@ -843,6 +843,7 @@
 			"method": "POST",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/deep-links",
 			"summary": "Register a globally unique app slug",
+			"description": "With `publication`, attaches or disconnects a legacy manual release URL instead. Both need a browser session as the project owner and are audited. Attaching also needs an unlabeled notebook and an approved non-managed release URL, and is refused while managed publishing is enabled. Disconnecting (`origin: null`) only clears a legacy URL, never a managed release.",
 			"parameters": [
 				{
 					"name": "nid",

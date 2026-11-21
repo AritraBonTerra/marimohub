@@ -1,4 +1,4 @@
-import { CloudRunPublicReleaseHost, googleAccessToken } from '@marimo-hub/publish-cloudrun';
+import { CloudRunPublicReleaseHost, googleCredentials } from '@marimo-hub/publish-cloudrun';
 import type { PublicReleaseHost, PublicReleaseLimits } from '@marimo-hub/core';
 import { parseEnum, parseIntEnv, requiredVar } from './env';
 import type { Env } from './env';
@@ -66,12 +66,30 @@ export function makePublicReleases(
 		'Set it to a dedicated service account with no IAM grants.',
 	);
 	const serviceAccountKey = env.MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY;
-	if (serviceAccountKey && publisherEmail(serviceAccountKey) === runtimeServiceAccount)
+	// A metadata-server publisher is compared by the host before its first deploy.
+	const keyEmail = serviceAccountKey ? publisherEmail(serviceAccountKey) : undefined;
+	if (
+		typeof keyEmail === 'string' &&
+		keyEmail.toLowerCase() === runtimeServiceAccount.toLowerCase()
+	)
 		throw new ConfigError('The public runtime service account must differ from the publisher', {
 			variable: 'MARIMOHUB_PUBLIC_RELEASE_GCP_RUNTIME_SA',
 			docs: DOCS,
 		});
-	const instance = env.MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE ?? 'default';
+	let credentials;
+	try {
+		credentials = googleCredentials({ serviceAccountKey, fetch: options.fetch });
+	} catch (error) {
+		throw new ConfigError(
+			`Invalid MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY: ${error instanceof Error ? error.message : ''}`,
+			{ variable: 'MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY', docs: DOCS },
+		);
+	}
+	// Revoke and the orphan sweep delete services labelled with this value, so it is never defaulted.
+	const instance = need(
+		'MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE',
+		'Set it to a label value unique to this hub installation.',
+	);
 	if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(instance))
 		throw new ConfigError('MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE must be a Cloud Run label value', {
 			variable: 'MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE',
@@ -93,7 +111,8 @@ export function makePublicReleases(
 			),
 			runtimeServiceAccount,
 			instance,
-			getToken: googleAccessToken({ serviceAccountKey, fetch: options.fetch }),
+			getToken: credentials.getToken,
+			getPublisherEmail: credentials.getEmail,
 			fetch: options.fetch,
 		});
 	} catch (error) {

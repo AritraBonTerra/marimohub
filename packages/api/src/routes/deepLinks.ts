@@ -6,11 +6,18 @@ import {
 	DeepLinkSlugSchema,
 	PublicAppOriginSchema,
 	ConflictError,
+	ForbiddenError,
 	isApprovedPublicAppOrigin,
+	isManagedPublicReleaseOrigin,
+	NotFoundError,
 	ValidationError,
 } from '@marimo-hub/core';
+import type { Context } from 'hono';
+import type { ApiDeps, HonoEnv } from '../context';
+import { appendAudit } from '../log';
 import {
 	assertProjectRole,
+	assertSessionAuthenticated,
 	authorizationService,
 	commonErrors,
 	createApp,
@@ -23,6 +30,7 @@ import {
 	NotebookIdParam,
 } from '../shared';
 import { AppSummarySchema, appSummary } from './apps';
+import type { DeepLink, DeepLinkTarget, NotebookMeta, Project } from '@marimo-hub/core';
 
 const SlugParam = z.object({ slug: DeepLinkSlugSchema });
 const LinkSchema = z.strictObject(DeepLinkSchema.shape).openapi('DeepLink');
@@ -73,6 +81,8 @@ const register = createRoute({
 	operationId: 'deep-links.register',
 	tags: ['App links'],
 	summary: 'Register a globally unique app slug',
+	description:
+		'With `publication`, attaches or disconnects a legacy manual release URL instead. Both need a browser session as the project owner and are audited. Attaching also needs an unlabeled notebook and an approved non-managed release URL, and is refused while managed publishing is enabled. Disconnecting (`origin: null`) only clears a legacy URL, never a managed release.',
 	request: {
 		params: NotebookIdParam,
 		body: jsonBody(
@@ -115,6 +125,107 @@ const release = createRoute({
 	},
 });
 
+/**
+ * Signed-in responses report the release head's managed origin (null once withdrawn); the
+ * stored `public_origin` is legacy-only and shown just for registrations with no managed history.
+ */
+async function withManagedOrigin(deps: ApiDeps, link: DeepLink): Promise<DeepLink> {
+	const managed = await deps.services.publicReleases?.resolveManagedOrigin(link);
+	return managed === undefined ? link : { ...link, public_origin: managed };
+}
+
+/**
+ * Attach or disconnect a legacy manual release URL. Managed releases never pass through
+ * here: their redirect authority is the release head, so a reserved managed origin can be
+ * neither attached nor cleared, and disconnect only CAS-clears the exact legacy origin.
+ */
+async function setLegacyPublicOrigin(
+	c: Context<HonoEnv>,
+	input: {
+		project: Project;
+		meta: NotebookMeta;
+		slug: string;
+		target: DeepLinkTarget;
+		registration_id: string;
+		origin: string | null;
+	},
+): Promise<DeepLink> {
+	const deps = c.get('deps');
+	const user = c.get('user');
+	const { project, meta, slug, target, origin } = input;
+	const suffix = deps.publicAppReleaseHostSuffix;
+	const managed = deps.services.publicReleases;
+	const managedSuffix = managed?.host.hostSuffix ?? suffix;
+	const isManaged = (value: string) =>
+		managedSuffix !== undefined && isManagedPublicReleaseOrigin(value, managedSuffix);
+	const current = (await deps.services.deepLinks.list(target)).find(
+		(link) => link.slug === slug && link.registration_id === input.registration_id,
+	);
+	if (!current) throw new NotFoundError('App link not found');
+	assertSessionAuthenticated(
+		c,
+		origin === null ? 'disconnect a public release URL' : 'publish an app link',
+	);
+	if (project.owner !== user.id)
+		throw new ForbiddenError('Only the project owner can change a public release URL');
+	let link: DeepLink;
+	if (origin === null) {
+		// No label check: an owner must be able to stop a release that was labeled later.
+		const attached = current.public_origin;
+		const legacy = attached && !(managed && isManaged(attached)) ? attached : null;
+		if (!legacy) {
+			// Never report a disconnect for a reserved managed name or a live managed release.
+			if (
+				attached ||
+				(managed && typeof (await managed.resolveManagedOrigin(current)) === 'string')
+			)
+				throw new ConflictError('Unpublish the managed public dashboard instead');
+			return withManagedOrigin(deps, current);
+		}
+		await deps.services.deepLinks.clearPublicOrigin(slug, target, current.registration_id, legacy);
+		link = { ...current, public_origin: null };
+	} else {
+		if (managed)
+			throw new ConflictError(
+				'Manual public release URLs are disabled while managed publishing is enabled',
+			);
+		const snapshot = await deps.services.catalog.getCurrentSnapshot();
+		const entry = snapshot.projects.find((p) => p.id === project.id);
+		if (
+			project.security_labels ||
+			meta.security_labels ||
+			entry?.security_labels_pending ||
+			entry?.notebooks.find((n) => n.id === meta.id)?.security_labels_pending
+		)
+			throw new ForbiddenError('Notebooks with security labels cannot be published publicly');
+		if (!isApprovedPublicAppOrigin(origin, suffix) || isManaged(origin))
+			throw new ValidationError('Use an approved Marimo public release URL');
+		link = await deps.services.deepLinks.setPublicOrigin(
+			slug,
+			target,
+			current.registration_id,
+			origin,
+		);
+	}
+	const event = origin === null ? 'deep_link.public_origin_cleared' : 'deep_link.public_origin_set';
+	await appendAudit(
+		deps,
+		{ requestId: c.get('requestId'), method: c.req.method, path: c.req.path, userId: user.id },
+		event,
+		() =>
+			deps.services.events.append({
+				event,
+				actor: user.id,
+				project_id: project.id,
+				notebook_id: meta.id,
+				slug,
+				registration_id: current.registration_id,
+				origin: origin ?? current.public_origin ?? null,
+			}),
+	);
+	return withManagedOrigin(deps, link);
+}
+
 const app = createApp();
 // Proxies can decode %2F before routing; OpenAPI still describes one slug parameter.
 app.openAPIRegistry.registerPath(resolve);
@@ -140,7 +251,7 @@ app.openapi({ ...resolve, path: '/deep-links/:slug{[\\s\\S]+}', hide: true }, as
 		{
 			success: true as const,
 			data: {
-				...link,
+				...(await withManagedOrigin(deps, link)),
 				app: await appSummary(deps, user, project, meta, meta.security_labels ?? null),
 			},
 		},
@@ -156,7 +267,11 @@ app.openapi(list, async (c) => {
 	return c.json(
 		{
 			success: true as const,
-			data: await deps.services.deepLinks.list({ kind: 'app', project_id: pid, notebook_id: nid }),
+			data: await Promise.all(
+				(
+					await deps.services.deepLinks.list({ kind: 'app', project_id: pid, notebook_id: nid })
+				).map((link) => withManagedOrigin(deps, link)),
+			),
 		},
 		200,
 	);
@@ -172,26 +287,11 @@ app.openapi(register, async (c) => {
 		'deep-link.manage',
 		deps,
 	);
-	await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
+	const meta = await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
 	const { slug, publication } = c.req.valid('json');
 	const target = { kind: 'app' as const, project_id: pid, notebook_id: nid };
-	if (publication && deps.services.publicReleases)
-		throw new ConflictError(
-			'Manual public release URLs are disabled while managed publishing is enabled',
-		);
-	if (
-		publication?.origin &&
-		!isApprovedPublicAppOrigin(publication.origin, deps.publicAppReleaseHostSuffix)
-	) {
-		throw new ValidationError('Use an approved Marimo public release URL');
-	}
 	const link = publication
-		? await deps.services.deepLinks.setPublicOrigin(
-				slug,
-				target,
-				publication.registration_id,
-				publication.origin,
-			)
+		? await setLegacyPublicOrigin(c, { project, meta, slug, target, ...publication })
 		: await deps.services.deepLinks.register(slug, target, user.id);
 	return c.json({ success: true as const, data: link }, 200);
 });

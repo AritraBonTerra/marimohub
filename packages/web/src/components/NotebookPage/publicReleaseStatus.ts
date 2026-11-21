@@ -19,19 +19,52 @@ export const PUBLIC_RELEASE_LABELS: Record<PublicRelease['state'], string> = {
 	failed: 'Failed',
 };
 
-/** In-flight work takes precedence over the live release in the app link row. */
+const TERMINAL = new Set<PublicRelease['state']>(['unpublished', 'failed']);
+
+/** A head-pending release is never public yet, even once its record reads `active`. */
+export function pendingLabel(release: PublicRelease): string {
+	return release.state === 'active'
+		? PUBLIC_RELEASE_LABELS.exposing
+		: PUBLIC_RELEASE_LABELS[release.state];
+}
+
+/**
+ * Status of one app link, keyed by the registration head: only the head's active and
+ * pending releases describe the link. Older releases still shutting down (superseded or
+ * abandoned) are `retiring` and never hide the live release's controls.
+ */
 export function publicLinkStatus(entry: PublicLinkReleases | undefined) {
 	const releases = entry?.releases ?? [];
-	const stopping = releases.find((r) => r.state === 'unpublishing');
-	const pending = releases.find((r) => r.state === 'publishing' || r.state === 'exposing');
-	const active = releases.find((r) => r.state === 'active');
-	const shown = stopping ?? pending ?? active;
+	const byId = (id: string | null | undefined) =>
+		id ? releases.find((r) => r.release_id === id) : undefined;
+	const head = byId(entry?.active_release_id);
+	const next =
+		entry?.pending_release_id !== entry?.active_release_id
+			? byId(entry?.pending_release_id)
+			: undefined;
+	const active = head?.state === 'active' && !head.withdraw_requested ? head : undefined;
+	// Core marks a candidate `active` before the head hands over, so it is still pending here.
+	const pending =
+		next && next.state !== 'unpublishing' && !TERMINAL.has(next.state) && !next.withdraw_requested
+			? next
+			: undefined;
+	// The head's own releases being withdrawn: the live one, or a cancelled replacement.
+	const stopping = head?.state === 'unpublishing' ? head : undefined;
+	const cancelling = next?.state === 'unpublishing' ? next : undefined;
+	const retiring = releases.filter((r) => !TERMINAL.has(r.state) && r !== head && r !== next);
+	const shown = stopping ?? pending ?? active ?? cancelling;
 	return {
 		active,
 		pending,
 		stopping,
-		label: shown ? PUBLIC_RELEASE_LABELS[shown.state] : null,
-		/** Unpublish before removing: a live release still owns this registration. */
-		locked: Boolean(shown),
+		cancelling,
+		retiring,
+		label: shown
+			? shown === pending
+				? pendingLabel(shown)
+				: PUBLIC_RELEASE_LABELS[shown.state]
+			: null,
+		/** Unpublish before removing: any live release still owns this registration. */
+		locked: Boolean(shown) || retiring.length > 0,
 	};
 }

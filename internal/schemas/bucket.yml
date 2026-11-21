@@ -5086,6 +5086,9 @@ components:
           type: integer
           minimum: -9007199254740991
           maximum: 9007199254740991
+        staging:
+          type: boolean
+          const: true
         bundle_cleaned:
           type: boolean
         error:
@@ -5191,6 +5194,9 @@ components:
           type: string
           format: ulid
           pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        managed_activated:
+          type: boolean
+          const: true
         last_release_id:
           anyOf:
             - type: string

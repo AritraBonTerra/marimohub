@@ -11,11 +11,12 @@ import { Callout } from '@/components/ui/Callout';
 import { Select } from '@/components/ui/Select';
 import { formatBytes } from '@/lib/formatBytes';
 import { formatRelative } from '@/lib/time';
-import { publicLinkStatus, PUBLIC_RELEASE_LABELS } from './publicReleaseStatus';
+import { pendingLabel, publicLinkStatus } from './publicReleaseStatus';
 import type { PublicLinkReleases, PublicRelease } from './publicReleaseStatus';
 
 export interface PublicReleaseLimits {
 	max_assets: number | null;
+	max_asset_bytes: number | null;
 	max_total_asset_bytes: number | null;
 }
 
@@ -57,7 +58,7 @@ export function PublicReleasePanel({
 	appPath,
 	onClose,
 }: PublicReleasePanelProps) {
-	const { active, pending, stopping } = publicLinkStatus(entry);
+	const { active, pending, stopping, cancelling, retiring } = publicLinkStatus(entry);
 	const versions = useNotebookVersionsQuery(projectId, notebookId);
 	const [chosenVersion, setChosenVersion] = useState<string | null>(null);
 	const versionId = chosenVersion ?? versions.data?.[0]?.version_id ?? null;
@@ -68,6 +69,8 @@ export function PublicReleasePanel({
 	const publish = usePublishPublicRelease(projectId, notebookId);
 	const unpublish = useUnpublishPublicRelease(projectId, notebookId);
 	const failed = entry?.releases.find((r) => r.state === 'failed' && r.error);
+	// Publishing waits for the head to settle; retiring releases never block it.
+	const changing = pending ?? stopping ?? cancelling;
 
 	const chosen = useMemo(
 		() =>
@@ -84,7 +87,7 @@ export function PublicReleasePanel({
 		(limits.max_total_asset_bytes !== null && totalBytes > limits.max_total_asset_bytes);
 	const busy = publish.isPending || unpublish.isPending;
 	const canPublish =
-		versionId !== null && assets.isSuccess && acknowledged && !overLimit && !pending && !stopping;
+		versionId !== null && assets.isSuccess && acknowledged && !overLimit && !changing;
 
 	const stop = (release: PublicRelease) => {
 		const dashboard = release.state === 'active' || release.activated_at !== undefined;
@@ -96,6 +99,19 @@ export function PublicReleasePanel({
 				else toast.success(confirmed ? 'Publish cancelled' : 'Cancelling publish…');
 			},
 		});
+	};
+
+	// The live release stays stoppable during a republish: cancel the replacement first,
+	// because the server keeps the live release while a replacement is still claimed.
+	const stopLive = async (live: PublicRelease) => {
+		try {
+			if (pending) await unpublish.mutateAsync(pending.release_id);
+			const { confirmed } = await unpublish.mutateAsync(live.release_id);
+			setConfirmingStop(false);
+			toast.success(confirmed ? 'Public dashboard stopped' : 'Stopping public dashboard…');
+		} catch {
+			// Shown inline from the mutation error.
+		}
 	};
 
 	return (
@@ -112,17 +128,49 @@ export function PublicReleasePanel({
 					</Button>
 				</Callout>
 			)}
+			{cancelling && !stopping && (
+				<Callout variant="info">
+					Cancelling the replacement release.
+					{active ? ` ${appPath} keeps serving the current release.` : ''}
+					{cancelling.error && <p className="mt-1 text-xs">{cancelling.error.message}</p>}
+					<Button
+						variant="ghost"
+						isDisabled={busy}
+						onPress={() => stop(cancelling)}
+						className="mt-2"
+					>
+						Retry cancel
+					</Button>
+				</Callout>
+			)}
 			{pending && !stopping && (
 				<Callout variant="info">
-					{PUBLIC_RELEASE_LABELS[pending.state]} The release becomes public once it answers without
-					sign-in.
+					{pendingLabel(pending)} The release becomes public once it answers without sign-in.
 					{pending.error && <p className="mt-1 text-xs">{pending.error.message}</p>}
 					<Button variant="ghost" isDisabled={busy} onPress={() => stop(pending)} className="mt-2">
 						Cancel publish
 					</Button>
 				</Callout>
 			)}
-			{failed && !pending && !stopping && (
+			{retiring.length > 0 && (
+				<div className="flex flex-col gap-1 rounded-md bg-muted p-2 text-xs">
+					<p className="text-muted-foreground">
+						Older {retiring.length === 1 ? 'release is' : 'releases are'} shutting down
+						automatically. {appPath} no longer opens them, and their direct release URLs stop
+						answering once revoked.
+					</p>
+					<ul className="flex flex-col gap-1">
+						{retiring.map((release) => (
+							<li key={release.release_id} className="break-all">
+								{formatRelative(release.created_at)} ·{' '}
+								{release.state === 'unpublishing' ? 'Stopping…' : 'Waiting to stop'}
+								{release.error ? ` · ${release.error.message}` : ''}
+							</li>
+						))}
+					</ul>
+				</div>
+			)}
+			{failed && !changing && (
 				<p role="alert" className="text-sm text-destructive">
 					Last publish failed: {failed.error!.message}
 				</p>
@@ -133,7 +181,7 @@ export function PublicReleasePanel({
 					share it.
 				</p>
 			)}
-			{!pending && !stopping && (
+			{!changing && (
 				<>
 					{versions.data && versions.data.length > 0 ? (
 						<Select
@@ -155,7 +203,9 @@ export function PublicReleasePanel({
 						</p>
 					)}
 					<p className="text-xs text-muted-foreground">
-						Publishing uses the selected saved version, not unsaved editor changes.
+						The notebook code comes from the selected saved version, not unsaved editor changes.
+						Git-synced notebooks list the files saved with that version; other notebooks list the
+						current workspace files. Publishing freezes the exact bytes you approve here.
 					</p>
 					{assets.isError && (
 						<p role="alert" className="text-sm text-destructive">
@@ -175,6 +225,11 @@ export function PublicReleasePanel({
 							</legend>
 							{assets.data.assets.length === 0 && (
 								<p className="text-xs text-muted-foreground">No workspace files available.</p>
+							)}
+							{assets.data.truncated && (
+								<p className="text-xs text-muted-foreground">
+									Showing a limited preview of the workspace. Some files are not listed.
+								</p>
 							)}
 							<ul className="flex max-h-48 flex-col gap-1 overflow-y-auto">
 								{assets.data.assets.map((asset) => (
@@ -201,7 +256,9 @@ export function PublicReleasePanel({
 													? asset.exposure === 'public_http'
 														? `Served at /${asset.path}`
 														: 'Read-only in Python'
-													: 'Too large'}{' '}
+													: limits.max_asset_bytes !== null
+														? `Over the ${formatBytes(limits.max_asset_bytes)} file limit`
+														: 'Too large'}{' '}
 												· {formatBytes(asset.size_bytes)}
 											</span>
 										</label>
@@ -238,12 +295,13 @@ export function PublicReleasePanel({
 					)}
 				</>
 			)}
-			{confirmingStop && active && !pending && !stopping && (
+			{confirmingStop && active && (
 				<Callout variant="warning">
 					Stop public access to {appPath} and shut down its public dashboard? Active anonymous
 					viewers will be disconnected.
+					{pending ? ' The release being published is cancelled first.' : ''}
 					<div className="mt-2 flex gap-2">
-						<Button variant="danger" isDisabled={busy} onPress={() => stop(active)}>
+						<Button variant="danger" isDisabled={busy} onPress={() => void stopLive(active)}>
 							{unpublish.isPending ? 'Stopping…' : 'Unpublish'}
 						</Button>
 						<Button variant="ghost" isDisabled={busy} onPress={() => setConfirmingStop(false)}>
@@ -258,7 +316,7 @@ export function PublicReleasePanel({
 				</p>
 			)}
 			<div className="flex flex-wrap gap-2">
-				{!pending && !stopping && (
+				{!changing && (
 					<Button
 						variant="primary"
 						isDisabled={!canPublish || busy}
@@ -286,7 +344,7 @@ export function PublicReleasePanel({
 						{publish.isPending ? 'Publishing…' : active ? 'Republish' : 'Publish'}
 					</Button>
 				)}
-				{active && !pending && !stopping && !confirmingStop && (
+				{active && !confirmingStop && (
 					<Button variant="danger" isDisabled={busy} onPress={() => setConfirmingStop(true)}>
 						Unpublish…
 					</Button>
@@ -296,5 +354,70 @@ export function PublicReleasePanel({
 				</Button>
 			</div>
 		</div>
+	);
+}
+
+interface EmergencyUnpublishPanelProps {
+	projectId: string;
+	notebookId: string;
+	entry: PublicLinkReleases | undefined;
+	appPath: string;
+	onClose: () => void;
+}
+
+/**
+ * Hub super admins without the owner's publish grant can still stop a link's live and
+ * pending releases. The server records each stop as an audited emergency action.
+ */
+export function EmergencyUnpublishPanel({
+	projectId,
+	notebookId,
+	entry,
+	appPath,
+	onClose,
+}: EmergencyUnpublishPanelProps) {
+	const { active, pending, stopping } = publicLinkStatus(entry);
+	const unpublish = useUnpublishPublicRelease(projectId, notebookId);
+	const targets = [pending, active].filter((release) => release !== undefined);
+	const run = async () => {
+		try {
+			let confirmed = true;
+			for (const release of targets)
+				confirmed = (await unpublish.mutateAsync(release.release_id)).confirmed && confirmed;
+			toast.success(confirmed ? 'Public dashboard stopped' : 'Stopping public dashboard…');
+			onClose();
+		} catch {
+			// Shown inline from the mutation error.
+		}
+	};
+	return (
+		<Callout variant="warning">
+			<h3 className="text-sm font-medium">Emergency unpublish · {appPath}</h3>
+			{targets.length > 0 ? (
+				<p className="mt-1">
+					Stop anonymous access to {appPath} as a hub admin? Active viewers are disconnected, this
+					action is recorded in the audit log, and only the project owner can publish again.
+				</p>
+			) : (
+				<p className="mt-1">
+					{stopping ? 'Public access is already stopping.' : 'This app link is not public.'}
+				</p>
+			)}
+			{unpublish.isError && (
+				<p role="alert" className="mt-1 text-sm text-destructive">
+					{unpublish.error.message}
+				</p>
+			)}
+			<div className="mt-2 flex gap-2">
+				{targets.length > 0 && (
+					<Button variant="danger" isDisabled={unpublish.isPending} onPress={() => void run()}>
+						{unpublish.isPending ? 'Stopping…' : 'Emergency unpublish'}
+					</Button>
+				)}
+				<Button variant="ghost" isDisabled={unpublish.isPending} onPress={onClose}>
+					Close
+				</Button>
+			</div>
+		</Callout>
 	);
 }
