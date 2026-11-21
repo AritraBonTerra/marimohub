@@ -306,6 +306,17 @@ export const paths = {
 	notebookMoves: '_system/notebook-moves/',
 	notebookMove: (nid: NotebookId) => `_system/notebook-moves/${nid}.json`,
 	deepLink: (slug: string) => `_system/deep-links/${slug}.json`,
+	publicReleasesPrefix: '_system/public-releases/',
+	publicRelease: (releaseId: string) => `_system/public-releases/${releaseId}.json`,
+	publicReleaseBundlePrefix: (releaseId: string) => `_system/public-releases/${releaseId}/bundle/`,
+	publicReleaseBundleFile: (releaseId: string, rel: string) =>
+		`_system/public-releases/${releaseId}/bundle/${rel}`,
+	publicReleaseHead: (registrationId: string) =>
+		`_system/public-release-heads/${registrationId}.json`,
+	/** One marker per non-terminal release, so the reconciler lists only live work. */
+	publicReleaseLivePrefix: '_system/public-release-live/',
+	publicReleaseLive: (releaseId: string) => `_system/public-release-live/${releaseId}.json`,
+	publicReleasesLock: '_system/_public_releases.lock',
 	catalog: '_system/catalog.json',
 	snapshot: (id: SnapshotId) => `_system/snapshots/${id}.json`,
 	snapshotsPrefix: '_system/snapshots/',

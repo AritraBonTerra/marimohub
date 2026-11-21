@@ -428,6 +428,7 @@ function useNotebookPageModel({ variant = 'edit', target }: NotebookPageProps) {
 		author,
 		backToProject,
 		canManageLinks: canManageProject(project.your_role),
+		canPublishLinks: project.owner === currentUserId,
 		linkRole: project.your_role ?? undefined,
 		canEditThumbnail: project.your_role !== null && !isViewer,
 		canOpenChangeRequest,
@@ -515,6 +516,7 @@ function renderNotebookPage(model: ReturnType<typeof useNotebookPageModel>) {
 		author,
 		backToProject,
 		canManageLinks,
+		canPublishLinks,
 		canEditThumbnail,
 		canOpenChangeRequest,
 		canRunApp,
@@ -696,6 +698,7 @@ function renderNotebookPage(model: ReturnType<typeof useNotebookPageModel>) {
 						projectId={pid!}
 						notebookId={nid!}
 						canManageLinks={canManageLinks}
+						canPublishLinks={canPublishLinks}
 						isApp={isApp}
 					/>
 				</div>

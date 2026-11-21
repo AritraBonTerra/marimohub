@@ -40,6 +40,11 @@ import { WarmPoolRecordSchema } from '../services/runtime/WarmPoolStore';
 import { AppPoolSchema } from '../services/runtime/AppPoolRouter';
 import { ThumbnailRecordSchema } from '../services/content/ThumbnailService';
 import { DeepLinkRecordSchema } from '../deepLinks';
+import {
+	PublicReleaseHeadSchema,
+	PublicReleaseLiveMarkerSchema,
+	PublicReleaseRecordSchema,
+} from '../publicReleases';
 import type { z } from 'zod';
 import { NotebookMoveSchema } from '../services/content/notebookMoveRecord';
 import { jsonSchema } from './jsonSchema';
@@ -281,6 +286,34 @@ export const STORED_OBJECTS: BucketObject[] = [
 		summary: 'Authoritative slug mapping or released marker.',
 		mutability: 'cas',
 		owner: 'DeepLinkService',
+		tag: 'deep-links',
+	},
+	{
+		name: 'PublicRelease',
+		key: paths.publicRelease('{release_id}'),
+		schema: PublicReleaseRecordSchema,
+		summary:
+			'Managed public dashboard release: pinned version, approved assets, host service, lease and withdrawal fence.',
+		mutability: 'cas',
+		owner: 'PublicReleaseService',
+		tag: 'deep-links',
+	},
+	{
+		name: 'PublicReleaseHead',
+		key: paths.publicReleaseHead('{registration_id}'),
+		schema: PublicReleaseHeadSchema,
+		summary: 'Active, in-flight and last release for one app link registration.',
+		mutability: 'cas',
+		owner: 'PublicReleaseService',
+		tag: 'deep-links',
+	},
+	{
+		name: 'PublicReleaseLiveMarker',
+		key: paths.publicReleaseLive('{release_id}'),
+		schema: PublicReleaseLiveMarkerSchema,
+		summary: 'Present while a release is not terminal; the reconciler lists only these.',
+		mutability: 'last-writer-wins',
+		owner: 'PublicReleaseService',
 		tag: 'deep-links',
 	},
 	{
@@ -742,6 +775,14 @@ export const STORED_OBJECTS: BucketObject[] = [
 ];
 
 const ARTIFACTS: BucketArtifact[] = [
+	{
+		name: 'PublicReleaseBundleFile',
+		key: paths.publicReleaseBundleFile('{release_id}', '{path}'),
+		summary: 'Frozen release file copied at publish time; deleted after activation or withdrawal.',
+		mutability: 'immutable',
+		owner: 'PublicReleaseService',
+		tag: 'deep-links',
+	},
 	{
 		name: 'WorkspaceUploadPart',
 		key: `${notebook.base}/uploads/{upload_id}/parts/{part}`,

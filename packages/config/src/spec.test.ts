@@ -12,6 +12,7 @@ const WIRING_SOURCES = [
 	fileURLToPath(new URL('./metadata.ts', import.meta.url)),
 	fileURLToPath(new URL('./ambientS3.ts', import.meta.url)),
 	fileURLToPath(new URL('./search.ts', import.meta.url)),
+	fileURLToPath(new URL('./publicRelease.ts', import.meta.url)),
 	fileURLToPath(new URL('./marimoAssets.ts', import.meta.url)),
 	fileURLToPath(new URL('./theme.ts', import.meta.url)),
 	fileURLToPath(new URL('./appPool.ts', import.meta.url)),

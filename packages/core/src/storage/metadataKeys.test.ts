@@ -34,6 +34,7 @@ describe('metadata placement manifest', () => {
 		'_system/working-branches/notebooks/p/n/saves/s/capture.json',
 		'projects/p/notebooks/n/proposals/p/changes/0',
 		'projects/p/object-uploads/u/parts/1',
+		'_system/public-releases/r/bundle/public/photo.png',
 	])('keeps payload %s in artifacts', (key) => {
 		expect(classifyMetadataKey(key)).toBe('artifact');
 	});
@@ -48,6 +49,10 @@ describe('metadata placement manifest', () => {
 		'projects/p/notebooks/n/jobs/j//prune-runs.json',
 		'projects/p/notebooks/n/jobs/j//prune-occurrences.json',
 		'projects/p/notebooks/n/uploads/index.json',
+		'_system/public-releases/r.json',
+		'_system/public-release-heads/r.json',
+		'_system/public-release-live/r.json',
+		'_system/_public_releases.lock',
 	])('keeps operational record %s in metadata', (key) => {
 		expect(classifyMetadataKey(key)).toBe('metadata');
 	});

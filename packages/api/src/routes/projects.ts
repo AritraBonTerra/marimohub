@@ -569,6 +569,13 @@ async function mutateSecurityLabels(
 		user.id,
 		ifMatchToken(c) ?? project.updated_at,
 	);
+	// Labeled content is never public; the reconciler withdraws too if this is interrupted.
+	if (labels !== undefined)
+		await deps.services.publicReleases?.withdrawTarget(
+			{ projectId: pid },
+			'security_labeled',
+			user.id,
+		);
 	c.header('ETag', etagFor(updated.updated_at));
 	return c.json({ success: true, data: projectResponse(updated, user, deps) }, 200);
 }
@@ -595,6 +602,7 @@ app.openapi(deleteProject, async (c) => {
 			}),
 		);
 	}
+	await deps.services.publicReleases?.withdrawTarget({ projectId: pid }, 'target_deleted', user.id);
 	await retireNotebookPreviews(deps, pid);
 	await deferTeardown(deps, 'project.retire_apps', () => retireLiveApps(deps, pid), {
 		project_id: pid,

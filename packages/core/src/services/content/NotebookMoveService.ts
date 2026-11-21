@@ -37,6 +37,7 @@ import type { JobsService } from '../jobs/JobsService';
 import type { JobRunService } from '../jobs/JobRunService';
 import type { NotebookProposalService } from './NotebookProposalService';
 import type { NotebookPreviewService } from './NotebookPreviewService';
+import type { PublicReleaseService } from './PublicReleaseService';
 import type { DeepLinkService } from './DeepLinkService';
 
 export { NotebookMoveSchema } from './notebookMoveRecord';
@@ -61,6 +62,7 @@ interface MoveOwners {
 	proposals: NotebookProposalService;
 	previews: NotebookPreviewService;
 	deepLinks: DeepLinkService;
+	publicReleases?: Pick<PublicReleaseService, 'hasNonTerminalForNotebook'>;
 }
 interface MoveInput {
 	source: ProjectId;
@@ -354,6 +356,8 @@ export class NotebookMoveService {
 			return movedNotebookMeta(existing);
 		}
 		assertVersionMatch(context.notebook.updated_at, input.expectedVersion);
+		if (await this.owners.publicReleases?.hasNonTerminalForNotebook(source, nid))
+			throw new ConflictError('Unpublish public app links before moving this notebook');
 
 		const executor = crypto.randomUUID();
 		let move = await this.lease(key, executor, { source, destination }, () => ({

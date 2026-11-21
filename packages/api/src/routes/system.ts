@@ -25,6 +25,7 @@ import {
 	subjectDefaultRole,
 } from '../shared';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '../pagination';
+import type { ApiDeps } from '../context';
 import { surfaceCapabilities } from './sessionSurfaces';
 import { chatAvailable } from '../chat/access';
 import { publicMarimoAssetUrl } from '../marimoAssets';
@@ -107,6 +108,19 @@ const capabilitiesRoute = createRoute({
 	},
 });
 
+function publicAppLinksCapability(deps: ApiDeps) {
+	const managed = deps.services.publicReleases;
+	const mode = managed ? 'managed' : deps.publicAppReleaseHostSuffix ? 'manual' : 'disabled';
+	return {
+		available: mode !== 'disabled',
+		mode,
+		max_live_releases: managed?.limits.maxLiveReleases ?? null,
+		max_assets: managed?.limits.maxAssets ?? null,
+		max_asset_bytes: managed?.limits.maxAssetBytes ?? null,
+		max_total_asset_bytes: managed?.limits.maxTotalAssetBytes ?? null,
+	} as const;
+}
+
 app.openapi(capabilitiesRoute, (c) => {
 	const deps = c.get('deps');
 	const previewReader = deps.sourceControl?.getReader('github');
@@ -142,6 +156,7 @@ app.openapi(capabilitiesRoute, (c) => {
 			sync_providers: [...(deps.sourceControl?.readerProviders() ?? [])],
 			pull_source_providers: [...(deps.sourceControl?.pullSourceProviders() ?? [])],
 		},
+		public_app_links: publicAppLinksCapability(deps),
 		project_alerts: {
 			available: Boolean(deps.projectAlerts),
 			destination_types: deps.projectAlerts

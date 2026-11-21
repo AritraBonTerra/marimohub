@@ -1755,6 +1755,19 @@ export const CapabilitiesResponseSchema = z
 				example: ['github'],
 			}),
 		}),
+		public_app_links: z
+			.object({
+				available: z.boolean(),
+				mode: z.enum(['managed', 'manual', 'disabled']).openapi({
+					description:
+						'`managed` publishes from the app link dialog; `manual` accepts an approved release URL; `disabled` keeps app links private.',
+				}),
+				max_live_releases: z.number().int().positive().nullable(),
+				max_assets: z.number().int().positive().nullable(),
+				max_asset_bytes: z.number().int().positive().nullable(),
+				max_total_asset_bytes: z.number().int().positive().nullable(),
+			})
+			.optional(),
 		project_alerts: z.object({
 			available: z.boolean(),
 			destination_types: z.array(extensibleResponseEnum(['slack', 'webhook'], 'slack')),

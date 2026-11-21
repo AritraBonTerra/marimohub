@@ -18,3 +18,4 @@ export * from './projectAlerts';
 export * from './sourceControl';
 export * from './adapterShape';
 export * from './externalAdapter';
+export * from './publicReleaseHost';

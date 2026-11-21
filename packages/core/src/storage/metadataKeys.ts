@@ -4,12 +4,12 @@ export const METADATA_BACKEND_KEY = '_system/metadata-backend.json';
 export type StoragePlacement = 'metadata' | 'artifact' | 'control';
 
 export const MAINTENANCE_LOCK_KEY_PATTERN =
-	/^_system\/(?:_(?:maintenance|session_lifecycle|jobs|warm_pool)\.lock|search\/lock\.json|(?:app-pool-maintenance|retention-(?:notebook_gc|snapshot_expiry|jobs))-lock\.json)$/;
+	/^_system\/(?:_(?:maintenance|session_lifecycle|jobs|warm_pool|public_releases)\.lock|search\/lock\.json|(?:app-pool-maintenance|retention-(?:notebook_gc|snapshot_expiry|jobs))-lock\.json)$/;
 
 const systemRecords = [
 	/^_system\/(catalog|host-retry-cleanup|preview-work|preview-cleanup-cursor|source-control-account-cleanup|snapshot-expiry-cursor|job-prune-cursor|notebook-gc-cursor|notebook-purge-cursor|project-purge-cursor)\.json$/,
 	MAINTENANCE_LOCK_KEY_PATTERN,
-	/^_system\/(migrations|notebook-moves|deep-links|snapshots|warm-pools|identities|tokens|cli-authorizations|cli-device-user-codes|oauth-clients|oauth-authorizations|oauth-rate-limits|host-retries|idempotency|sandbox-diagnostics|preview-projects|preview-receipts)\/[^/]+\.json$/,
+	/^_system\/(migrations|notebook-moves|deep-links|snapshots|warm-pools|identities|tokens|cli-authorizations|cli-device-user-codes|oauth-clients|oauth-authorizations|oauth-rate-limits|host-retries|idempotency|sandbox-diagnostics|preview-projects|preview-receipts|public-releases|public-release-heads|public-release-live)\/[^/]+\.json$/,
 	/^_system\/(sessions|version-prune-cutoffs|apps|app-pools|editors|job-runs|preview-automations|preview-active-projects|source-control-accounts)\/[^/]+\/[^/]+\.json$/,
 	/^_system\/session-index\/users\/[^/]+\.json$/,
 	/^_system\/reconcile\/orphans\/[^/]+\.json$/,
@@ -56,6 +56,7 @@ function uploadPlacement(key: string): StoragePlacement | undefined {
 export function classifyMetadataKey(key: string): StoragePlacement {
 	if (key === METADATA_BACKEND_KEY) return 'control';
 	if (systemRecords.some((rule) => rule.test(key))) return 'metadata';
+	if (/^_system\/public-releases\/[^/]+\/bundle\/.+$/.test(key)) return 'artifact';
 	if (/^_system\/working-branches\/notebooks\/[^/]+\/[^/]+\/saves\/[^/]+\/capture\.json$/.test(key))
 		return 'artifact';
 	if (

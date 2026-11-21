@@ -37,6 +37,9 @@ import { IdentityService } from './identity/IdentityService';
 import { MaintenanceService } from './catalog/MaintenanceService';
 import { NotebookService } from './content/NotebookService';
 import { DeepLinkService } from './content/DeepLinkService';
+import { PublicReleaseService } from './content/PublicReleaseService';
+import type { PublicReleaseHost } from '../ports/publicReleaseHost';
+import type { PublicReleaseLimits } from '../publicReleases';
 import { WorkingBranchService } from './content/WorkingBranchService';
 import type { SourceControlRegistry } from '../ports/sourceControl';
 import { NotebookProposalService } from './content/NotebookProposalService';
@@ -59,6 +62,12 @@ export {
 export { HostRetryStore } from './runtime/HostRetryStore';
 export type { HostRetryClaim, HostRetryReply } from './runtime/HostRetryStore';
 export { DeepLinkService } from './content/DeepLinkService';
+export { PublicReleaseService } from './content/PublicReleaseService';
+export type {
+	PublicAppLinkReleases,
+	PublicReleaseAssetCandidate,
+	PublishPublicReleaseInput,
+} from './content/PublicReleaseService';
 export { CatalogService } from './catalog/CatalogService';
 export type { KnownObject } from './catalog/cas';
 export type { CatalogRecoverySource, CatalogRecoveryReport } from './catalog/recovery';
@@ -531,6 +540,8 @@ const bucketAttrs: AttrExtractors<Bucket> = {
 
 export interface CreateServicesOptions {
 	backgroundWork?: BackgroundWork;
+	/** Enables managed public dashboard releases on this host. */
+	publicReleases?: { host: PublicReleaseHost; limits?: Partial<PublicReleaseLimits> };
 	workspaceLimits?: WorkspaceLimits;
 	repositoryHosts?: GitProviderHosts;
 	sourceControl?: SourceControlRegistry;
@@ -744,6 +755,22 @@ export function createServices(
 		prune: previewRecord,
 	});
 
+	const publicReleases = options?.publicReleases
+		? wrap(
+				'PublicReleaseService',
+				new PublicReleaseService({
+					bucket,
+					host: options.publicReleases.host,
+					limits: options.publicReleases.limits,
+					deepLinks,
+					notebooks,
+					projects,
+					catalog,
+					events,
+				}),
+			)
+		: undefined;
+
 	const migrations = wrap(
 		'MigrationService',
 		new MigrationService(
@@ -779,6 +806,7 @@ export function createServices(
 				proposals,
 				previews,
 				deepLinks,
+				publicReleases,
 			}),
 			{
 				move: (input) => ({
@@ -793,6 +821,7 @@ export function createServices(
 		jobs,
 		jobRuns,
 		deepLinks,
+		publicReleases,
 		identities,
 		tokens,
 		cliAuthorizations,

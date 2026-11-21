@@ -109,3 +109,13 @@ def test_widget_update_limits_streamed_body():
         content=iter([b"a" * MAX_WIDGET_BODY_BYTES, b"b"]),
     )
     assert response.status_code == 413
+
+
+def test_responses_carry_security_headers():
+    client = TestClient(PublicDashboard(runtime, origin=ORIGIN))
+    for response in [client.get("/"), client.get("/notebook.py")]:
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["X-Robots-Tag"] == "noindex, nofollow"

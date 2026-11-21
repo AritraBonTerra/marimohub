@@ -623,6 +623,115 @@ paths:
       responses:
         '204':
           description: Stored.
+  /_system/public-releases/{release_id}.json:
+    summary: 'Managed public dashboard release: pinned version, approved assets,
+      host service, lease and withdrawal fence.'
+    parameters:
+      - name: release_id
+        in: path
+        required: true
+        schema:
+          type: string
+    x-mutability: cas
+    x-owner: PublicReleaseService
+    get:
+      operationId: read_system_public_releases_json
+      summary: Read PublicRelease
+      tags:
+        - deep-links
+      responses:
+        '200':
+          description: The stored object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicRelease'
+    put:
+      operationId: write_system_public_releases_json
+      summary: Write PublicRelease
+      tags:
+        - deep-links
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicRelease'
+      responses:
+        '204':
+          description: Stored.
+  /_system/public-release-heads/{registration_id}.json:
+    summary: Active, in-flight and last release for one app link registration.
+    parameters:
+      - name: registration_id
+        in: path
+        required: true
+        schema:
+          type: string
+    x-mutability: cas
+    x-owner: PublicReleaseService
+    get:
+      operationId: read_system_public_release_heads_json
+      summary: Read PublicReleaseHead
+      tags:
+        - deep-links
+      responses:
+        '200':
+          description: The stored object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicReleaseHead'
+    put:
+      operationId: write_system_public_release_heads_json
+      summary: Write PublicReleaseHead
+      tags:
+        - deep-links
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicReleaseHead'
+      responses:
+        '204':
+          description: Stored.
+  /_system/public-release-live/{release_id}.json:
+    summary: Present while a release is not terminal; the reconciler lists only these.
+    parameters:
+      - name: release_id
+        in: path
+        required: true
+        schema:
+          type: string
+    x-mutability: last-writer-wins
+    x-owner: PublicReleaseService
+    get:
+      operationId: read_system_public_release_live_json
+      summary: Read PublicReleaseLiveMarker
+      tags:
+        - deep-links
+      responses:
+        '200':
+          description: The stored object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicReleaseLiveMarker'
+    put:
+      operationId: write_system_public_release_live_json
+      summary: Write PublicReleaseLiveMarker
+      tags:
+        - deep-links
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicReleaseLiveMarker'
+      responses:
+        '204':
+          description: Stored.
   /_system/catalog.json:
     summary: The one mutable pointer in the catalog snapshot chain.
     parameters: []
@@ -2707,6 +2816,50 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/EventIdempotencyMarker'
+      responses:
+        '204':
+          description: Stored.
+  /_system/public-releases/{release_id}/bundle/{path}:
+    summary: Frozen release file copied at publish time; deleted after activation or
+      withdrawal.
+    parameters:
+      - name: release_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+    x-mutability: immutable
+    x-owner: PublicReleaseService
+    get:
+      operationId: read_system_public_releases_bundle
+      summary: Read PublicReleaseBundleFile
+      tags:
+        - deep-links
+      responses:
+        '200':
+          description: The stored artifact.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+    put:
+      operationId: write_system_public_releases_bundle
+      summary: Write PublicReleaseBundleFile
+      tags:
+        - deep-links
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
       responses:
         '204':
           description: Stored.
@@ -4810,6 +4963,285 @@ components:
             - released
             - registration_id
           additionalProperties: false
+    PublicRelease:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          exclusiveMinimum: 0
+          maximum: 9007199254740991
+        release_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        slug:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?![\s\S])
+        registration_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        target:
+          type: object
+          properties:
+            kind:
+              type: string
+              const: app
+            project_id:
+              type: string
+            notebook_id:
+              type: string
+          required:
+            - kind
+            - project_id
+            - notebook_id
+          additionalProperties: false
+        version_id:
+          type: string
+        entrypoint:
+          type: string
+          minLength: 1
+        code_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        assets:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              sha256:
+                type: string
+                pattern: ^[0-9a-f]{64}$
+              size_bytes:
+                type: integer
+                minimum: 0
+                maximum: 9007199254740991
+              exposure:
+                type: string
+                enum:
+                  - public_http
+                  - runtime_only
+            required:
+              - path
+              - sha256
+              - size_bytes
+              - exposure
+            additionalProperties: false
+        service_name:
+          type: string
+        origin:
+          type: string
+        state:
+          type: string
+          enum:
+            - publishing
+            - exposing
+            - active
+            - unpublishing
+            - unpublished
+            - failed
+        withdraw_requested:
+          type: boolean
+        withdraw_reason:
+          type: string
+          enum:
+            - user
+            - republish_superseded
+            - target_deleted
+            - security_labeled
+            - link_changed
+            - publish_failed
+        image_digest:
+          type: string
+        build_id:
+          type: string
+        attempt:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        lease:
+          type: object
+          properties:
+            owner:
+              type: string
+            token:
+              type: string
+            until:
+              type: integer
+              minimum: -9007199254740991
+              maximum: 9007199254740991
+          required:
+            - owner
+            - token
+            - until
+        fenced_until:
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        next_retry_at:
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        deadline_at:
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        bundle_cleaned:
+          type: boolean
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+            - code
+            - message
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+        updated_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+        exposed_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+        activated_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+        unpublish_requested_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+        unpublished_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+      required:
+        - schema_version
+        - release_id
+        - slug
+        - registration_id
+        - target
+        - version_id
+        - entrypoint
+        - code_sha256
+        - assets
+        - service_name
+        - origin
+        - state
+        - withdraw_requested
+        - attempt
+        - deadline_at
+        - created_by
+        - created_at
+        - updated_at
+      additionalProperties: {}
+    PublicReleaseHead:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          exclusiveMinimum: 0
+          maximum: 9007199254740991
+        registration_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        slug:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?![\s\S])
+        target:
+          type: object
+          properties:
+            kind:
+              type: string
+              const: app
+            project_id:
+              type: string
+            notebook_id:
+              type: string
+          required:
+            - kind
+            - project_id
+            - notebook_id
+          additionalProperties: false
+        active_release_id:
+          anyOf:
+            - type: string
+              format: ulid
+              pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+            - type: 'null'
+        pending_release_id:
+          anyOf:
+            - type: string
+              format: ulid
+              pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+            - type: 'null'
+        last_release_id:
+          anyOf:
+            - type: string
+              format: ulid
+              pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+            - type: 'null'
+        updated_at:
+          type: string
+          format: date-time
+          pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
+      required:
+        - schema_version
+        - registration_id
+        - slug
+        - target
+        - active_release_id
+        - pending_release_id
+        - last_release_id
+        - updated_at
+      additionalProperties: {}
+    PublicReleaseLiveMarker:
+      type: object
+      properties:
+        release_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        registration_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
+        target:
+          type: object
+          properties:
+            kind:
+              type: string
+              const: app
+            project_id:
+              type: string
+            notebook_id:
+              type: string
+          required:
+            - kind
+            - project_id
+            - notebook_id
+          additionalProperties: false
+      required:
+        - release_id
+        - registration_id
+        - target
+      additionalProperties: {}
     Catalog:
       type: object
       properties:

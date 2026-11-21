@@ -43,6 +43,7 @@ import projectAlertsApp from './routes/projectAlerts';
 import integrationsApp from './routes/integrations';
 import jobsApp from './routes/jobs';
 import deepLinksApp from './routes/deepLinks';
+import publicReleasesApp from './routes/publicReleases';
 import appsApp from './routes/apps';
 import sessionsApp from './routes/sessions';
 import systemApp from './routes/system';
@@ -109,7 +110,9 @@ const API_PREFIX = '/api/v1';
 function isDeepLinkPath(path: string): boolean {
 	return (
 		path.startsWith(`${API_PREFIX}/deep-links/`) ||
-		/^\/api\/v1\/projects\/[^/]+\/notebooks\/[^/]+\/deep-links(?:\/|$)/.test(path)
+		/^\/api\/v1\/projects\/[^/]+\/notebooks\/[^/]+\/(?:deep-links|public-releases)(?:\/|$)/.test(
+			path,
+		)
 	);
 }
 
@@ -627,6 +630,7 @@ export function createApi(rawDeps: ApiDeps) {
 	app.route(API_PREFIX, notebookMovesApp);
 	app.route(API_PREFIX, thumbnailsApp);
 	app.route(API_PREFIX, deepLinksApp);
+	app.route(API_PREFIX, publicReleasesApp);
 	app.route(API_PREFIX, searchApp);
 	app.route(API_PREFIX, conversationsApp);
 	app.route(API_PREFIX, previewsApp);

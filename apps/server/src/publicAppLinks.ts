@@ -31,6 +31,7 @@ export function redirectPublicAppLinks(
 		resolve(slug: string): Promise<{ registration_id: string; public_origin?: string | null }>;
 	},
 	hostSuffix?: string,
+	managed?: { canRedirect(registrationId: string, origin: string): Promise<boolean> },
 ): MiddlewareHandler {
 	return async (c, next) => {
 		if (c.req.method !== 'GET' && c.req.method !== 'HEAD') return next();
@@ -61,6 +62,8 @@ export function redirectPublicAppLinks(
 				: link.public_origin;
 		if (!origin) return next();
 		if (link.public_origin && !isApprovedPublicAppOrigin(origin, hostSuffix)) return next();
+		if (link.public_origin && managed && !(await managed.canRedirect(link.registration_id, origin)))
+			return next();
 
 		c.header('Cache-Control', 'no-store');
 		c.header('Referrer-Policy', 'no-referrer');

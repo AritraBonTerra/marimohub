@@ -5,6 +5,7 @@ import {
 	DeepLinkSchema,
 	DeepLinkSlugSchema,
 	PublicAppOriginSchema,
+	ConflictError,
 	isApprovedPublicAppOrigin,
 	ValidationError,
 } from '@marimo-hub/core';
@@ -174,6 +175,10 @@ app.openapi(register, async (c) => {
 	await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
 	const { slug, publication } = c.req.valid('json');
 	const target = { kind: 'app' as const, project_id: pid, notebook_id: nid };
+	if (publication && deps.services.publicReleases)
+		throw new ConflictError(
+			'Manual public release URLs are disabled while managed publishing is enabled',
+		);
 	if (
 		publication?.origin &&
 		!isApprovedPublicAppOrigin(publication.origin, deps.publicAppReleaseHostSuffix)
@@ -202,10 +207,13 @@ app.openapi({ ...release, path: `${notebookPath}/:slug{[\\s\\S]+}`, hide: true }
 		deps,
 	);
 	await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
+	const registrationId = c.req.valid('query').registration_id;
+	if (await deps.services.publicReleases?.hasNonTerminalForRegistration(registrationId))
+		throw new ConflictError('Unpublish this app link before removing it');
 	await deps.services.deepLinks.release(
 		slug,
 		{ kind: 'app', project_id: pid, notebook_id: nid },
-		c.req.valid('query').registration_id,
+		registrationId,
 	);
 	return c.json({ success: true as const, data: null }, 200);
 });

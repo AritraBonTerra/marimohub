@@ -49,7 +49,7 @@ repository root's own `test:root:vitest` task reuses the same `vitestTaskCache`.
   Anything that _reaches_ something — a store, a cluster, an IdP — is a port.
 - **Adapters** (`packages/storage-*`, `packages/compute-*`, `packages/auth-*`,
   `packages/object-browser-*`, `packages/notify-*`, `packages/source-control-*`,
-  `packages/search-bucket`, `packages/embeddings-http`, and the credential,
+  `packages/search-bucket`, `packages/embeddings-http`, `packages/publish-*`, and the credential,
   secret, and DuckDB runtime packages) implement the ports.
   `packages/api` wires the services to Hono/OpenAPI routes via
   `@hono/zod-openapi`.
@@ -81,7 +81,7 @@ the only places concrete adapters are imported. **Reject PRs that violate this**
 is enforced mechanically: a
 `no-restricted-imports` override in `vite.config.ts` (files `packages/core/**`,
 `packages/api/**`) bans `@marimo-hub/{storage,compute,auth,credentials,secrets}-*`
-imports, `@marimo-hub/{notify,object-browser,database-browser,source-control,search,embeddings}-*`
+imports, `@marimo-hub/{notify,object-browser,database-browser,source-control,search,embeddings,publish}-*`
 imports, `@marimo-hub/{duckdb-wasm-runtime,postgres-runtime}`, and
 `@marimo-hub/notebook-bridge` (including its subpaths). A colocated `package-dependencies.test.ts` in
 each of `core` and `api` fails if one of these packages appears in its
@@ -177,6 +177,13 @@ These CAS-managed records also have one writer each:
 - `DeepLinkService` owns each slug at `_system/deep-links/{slug}.json` and each
   notebook-local `deep-links/{slug}.json` index marker. Global records use CAS
   release markers and must not be deleted.
+- `PublicReleaseService` owns each managed public release at `_system/public-releases/{release-id}.json`,
+  its frozen bundle under `_system/public-releases/{release-id}/bundle/`, each registration head at
+  `_system/public-release-heads/{registration-id}.json`, and each removable live marker at
+  `_system/public-release-live/{release-id}.json`. Releases and heads are CAS records and are retained.
+  It changes `DeepLink.public_origin` only through `DeepLinkService`, and never for an origin
+  without a managed head. A release is marked `unpublished` only after its fence passes and the
+  host confirms the service is gone.
 - `SourceControlAccountService` owns `_system/source-control-accounts/{user-id}/head.json`, each connection record, and `_system/source-control-account-cleanup.json`. Retain heads and credential-free connection tombstones to fence delayed callbacks and refreshes.
 - `IdentityService` owns each identity at `_system/identities/{user-id}.json`.
 - `CliAuthorizationService` owns each short-lived CLI login grant at

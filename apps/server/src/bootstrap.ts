@@ -15,6 +15,7 @@ import { DeferredWorkQueue } from './backgroundWork';
 import {
 	startMigrations,
 	startPreviewPreparation,
+	startPublicReleases,
 	startJobScheduler,
 	startMaintenance,
 	startSearchIndexing,
@@ -105,7 +106,7 @@ export async function bootstrap(
 			await deps.storageLifecycle?.close();
 			throw error;
 		}
-		deps.publicAppReleaseHostSuffix = validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX;
+		deps.publicAppReleaseHostSuffix ??= validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX;
 		await prepareDeps?.(deps);
 	} catch (err) {
 		if (isConfigError(err)) {
@@ -209,6 +210,7 @@ export async function bootstrap(
 				publicAppReleases,
 				deps.services.deepLinks,
 				deps.publicAppReleaseHostSuffix,
+				deps.services.publicReleases,
 			),
 		);
 	}
@@ -231,6 +233,8 @@ export async function bootstrap(
 		stops.push(startMaintenance(deps, wideEvents, loops));
 		const stopSearch = startSearchIndexing(deps, loops);
 		if (stopSearch) stops.push(stopSearch);
+		const stopPublicReleases = startPublicReleases(deps, loops);
+		if (stopPublicReleases) stops.push(stopPublicReleases);
 		const stopPreviews = startPreviewPreparation(deps, loops);
 		if (stopPreviews) stops.push(stopPreviews);
 		const stopLifecycle = startSessionLifecycle(deps, loops);
