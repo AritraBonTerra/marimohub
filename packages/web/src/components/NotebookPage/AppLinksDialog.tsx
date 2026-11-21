@@ -12,7 +12,8 @@ import { TextField } from '@/components/ui/TextField';
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard';
 import { withBasePath } from '@/lib/basePath';
 import { shareableNotebookQuery } from '@/lib/notebookUrls';
-import { PublicReleaseBadge, PublicReleasePanel, publicLinkStatus } from './PublicReleasePanel';
+import { PublicReleaseBadge, PublicReleasePanel } from './PublicReleasePanel';
+import { publicLinkStatus } from './publicReleaseStatus';
 
 interface AppLinksDialogProps {
 	projectId: string;

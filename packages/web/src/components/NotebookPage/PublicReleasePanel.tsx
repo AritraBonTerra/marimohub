@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import type { components } from '@marimo-hub/client';
 import { useNotebookVersionsQuery } from '@/api/hooks';
 import {
 	usePublicReleaseAssetsQuery,
@@ -12,46 +11,12 @@ import { Callout } from '@/components/ui/Callout';
 import { Select } from '@/components/ui/Select';
 import { formatBytes } from '@/lib/formatBytes';
 import { formatRelative } from '@/lib/time';
-
-type PublicRelease = components['schemas']['PublicRelease'];
-
-export interface PublicLinkReleases {
-	registration_id: string;
-	slug: string;
-	active_release_id: string | null;
-	pending_release_id: string | null;
-	releases: PublicRelease[];
-}
+import { publicLinkStatus, PUBLIC_RELEASE_LABELS } from './publicReleaseStatus';
+import type { PublicLinkReleases, PublicRelease } from './publicReleaseStatus';
 
 export interface PublicReleaseLimits {
 	max_assets: number | null;
 	max_total_asset_bytes: number | null;
-}
-
-const STATE_LABEL: Record<PublicRelease['state'], string> = {
-	publishing: 'Deploying…',
-	exposing: 'Verifying…',
-	active: 'Public',
-	unpublishing: 'Stopping…',
-	unpublished: 'Private',
-	failed: 'Failed',
-};
-
-/** The row badge for one app link: in-flight work wins over the live release. */
-export function publicLinkStatus(entry: PublicLinkReleases | undefined) {
-	const releases = entry?.releases ?? [];
-	const stopping = releases.find((r) => r.state === 'unpublishing');
-	const pending = releases.find((r) => r.state === 'publishing' || r.state === 'exposing');
-	const active = releases.find((r) => r.state === 'active');
-	const shown = stopping ?? pending ?? active;
-	return {
-		active,
-		pending,
-		stopping,
-		label: shown ? STATE_LABEL[shown.state] : null,
-		/** Unpublish before removing: a live release still owns this registration. */
-		locked: Boolean(stopping ?? pending ?? active),
-	};
 }
 
 export function PublicReleaseBadge({ entry }: { entry: PublicLinkReleases | undefined }) {
@@ -145,7 +110,8 @@ export function PublicReleasePanel({
 			)}
 			{pending && !stopping && (
 				<Callout variant="info">
-					{STATE_LABEL[pending.state]} The release becomes public once it answers without sign-in.
+					{PUBLIC_RELEASE_LABELS[pending.state]} The release becomes public once it answers without
+					sign-in.
 					{pending.error && <p className="mt-1 text-xs">{pending.error.message}</p>}
 					<Button variant="ghost" isDisabled={busy} onPress={() => stop(pending)} className="mt-2">
 						Cancel publish
