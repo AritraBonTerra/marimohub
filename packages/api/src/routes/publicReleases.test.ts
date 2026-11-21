@@ -162,6 +162,34 @@ describe('public release routes', () => {
 		).toBeNull();
 	});
 
+	it('withdraws the live release while its cancelled replacement is still stopping', async () => {
+		const input = {
+			projectId: pid,
+			notebookId: nid,
+			slug: 'sales',
+			registrationId: link.registration_id,
+			versionId,
+			assets: [],
+			actor: ACTOR,
+		};
+		const service = services.publicReleases!;
+		const live = await service.publish(input);
+		await settle(live.release_id);
+		host.pollsUntilReady = 5;
+		const replacement = await service.publish(input);
+		await service.advance(replacement.release_id, 'test-worker');
+		host.pollsUntilDeleted = 5;
+		const stop = (releaseId: string) =>
+			api.request('POST', `${releasesPath()}/${releaseId}/unpublish`);
+		expect(await expectOk(await stop(replacement.release_id), 202)).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await expectOk(await stop(live.release_id), 202)).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await service.resolveManagedOrigin(link)).toBeNull();
+	});
+
 	it('rejects tokens, non-managers and stale asset hashes', async () => {
 		const body = { slug: 'sales', registration_id: link.registration_id, version_id: versionId };
 		const pat = apiAs(ACTOR, { kind: 'personal-access-token', id: 'tok' });

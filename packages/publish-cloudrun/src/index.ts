@@ -315,11 +315,7 @@ export class CloudRunPublicReleaseHost implements PublicReleaseHost {
 			}
 			return { status: 'in_progress', imageDigest };
 		}
-		if (service.labels?.[RELEASE_LABEL] !== releaseId.toLowerCase())
-			throw new PublicReleaseHostFatalError(
-				'service_conflict',
-				`${serviceName} belongs to another release`,
-			);
+		this.assertReleaseIdentity(serviceName, releaseId, service);
 		const state = service.terminalCondition?.state;
 		if (state === 'CONDITION_FAILED')
 			throw new PublicReleaseHostFatalError(
@@ -329,11 +325,7 @@ export class CloudRunPublicReleaseHost implements PublicReleaseHost {
 					200,
 				),
 			);
-		if (service.template?.serviceAccount !== this.config.runtimeServiceAccount)
-			throw new PublicReleaseHostFatalError(
-				'service_account_mismatch',
-				`${serviceName} does not run as the configured runtime service account`,
-			);
+
 		const image = service.template?.containers?.[0]?.image ?? '';
 		const imageDigest = /@(sha256:[0-9a-f]{64})$/.exec(image)?.[1];
 		if (service.reconciling || state !== 'CONDITION_SUCCEEDED' || !imageDigest)
@@ -396,11 +388,27 @@ export class CloudRunPublicReleaseHost implements PublicReleaseHost {
 		};
 	}
 
+	private assertReleaseIdentity(serviceName: string, releaseId: string, service: CloudRunService) {
+		if (service.labels?.[RELEASE_LABEL] !== releaseId.toLowerCase())
+			throw new PublicReleaseHostFatalError(
+				'service_conflict',
+				`${serviceName} belongs to another release`,
+			);
+		if (service.template?.serviceAccount !== this.config.runtimeServiceAccount)
+			throw new PublicReleaseHostFatalError(
+				'service_account_mismatch',
+				`${serviceName} does not run as the configured runtime service account`,
+			);
+	}
+
 	async expose(input: Parameters<PublicReleaseHost['expose']>[0]): Promise<void> {
 		const { serviceName, signal } = input;
 		this.assertManaged(serviceName, null);
 		await this.assertSeparatePublisher(signal);
-		this.assertManaged(serviceName, await this.getService(serviceName, signal));
+		const service = await this.getService(serviceName, signal);
+		if (!service) throw new Error('Public dashboard service not found');
+		this.assertManaged(serviceName, service);
+		this.assertReleaseIdentity(serviceName, input.releaseId, service);
 		await this.updatePolicy(
 			serviceName,
 			(policy) => {

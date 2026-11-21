@@ -122,6 +122,7 @@ export const PublicReleaseHeadSchema = z.looseObject({
 	/** At most one publish in flight per registration; claimed by CAS. */
 	pending_release_id: ulidString().nullable(),
 	withdrawing_release_id: ulidString().optional(),
+	cancelling_release_id: ulidString().optional(),
 	managed_activated: z.literal(true).optional(),
 	last_release_id: ulidString().nullable(),
 	updated_at: utcTimestamp(),

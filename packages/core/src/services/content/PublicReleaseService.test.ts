@@ -257,10 +257,12 @@ describe('PublicReleaseService', () => {
 			'Cancel the replacement',
 		);
 		await releases.requestUnpublish(replacement.release_id, 'user');
-		await settle(replacement.release_id);
 		await releases.requestUnpublish(initial.release_id, 'user');
 		expect(await approvedOrigin(initial.slug)).toBeNull();
 		await expect(publish()).rejects.toThrow('Unpublishing is already in progress');
+		expect(await settle(initial.release_id)).toMatchObject({ state: 'unpublished' });
+		expect(await settle(replacement.release_id)).toMatchObject({ state: 'failed' });
+		expect(await approvedOrigin(initial.slug)).toBeNull();
 	});
 
 	it('limits preview downloads while showing that more files exist', async () => {
@@ -390,6 +392,71 @@ describe('PublicReleaseService', () => {
 			state: 'unpublished',
 		});
 		expect(host.services.has(withdrawing.service_name)).toBe(false);
+	});
+
+	it('lists head records even when an unrelated indexed release cannot be read', async () => {
+		const active = await publish();
+		await settle(active.release_id);
+		const otherNotebook = await services.notebooks.createNotebook(
+			target.project_id,
+			{ title: 'Other', description: '', code: 'import marimo' },
+			ACTOR,
+		);
+		const otherTarget = { ...target, notebook_id: otherNotebook.id };
+		const otherLink = await services.deepLinks.register('other', otherTarget, ACTOR);
+		const broken = await releases.publish({
+			projectId: target.project_id,
+			notebookId: otherNotebook.id,
+			slug: otherLink.slug,
+			registrationId: otherLink.registration_id,
+			versionId: (await services.notebooks.getNotebook(target.project_id, otherNotebook.id)).source
+				.current_version_id!,
+			assets: [],
+			actor: ACTOR,
+		});
+		const originalGet = bucket.get.bind(bucket);
+		const get = vi.spyOn(bucket, 'get').mockImplementation(async (...args) => {
+			if (args[0] === paths.publicRelease(broken.release_id)) throw new Error('Unreadable record');
+			return originalGet(...args);
+		});
+		try {
+			expect(await releases.listForNotebook(target.project_id, target.notebook_id)).toMatchObject([
+				{ active_release_id: active.release_id, releases: [{ release_id: active.release_id }] },
+			]);
+			await expect(releases.listForNotebook(target.project_id, otherNotebook.id)).rejects.toThrow(
+				'Unreadable record',
+			);
+		} finally {
+			get.mockRestore();
+		}
+	});
+
+	it('revokes the direct URL before retrying legacy pointer cleanup', async () => {
+		const release = await publish();
+		await settle(release.release_id);
+		await services.deepLinks.setPublicOrigin(
+			release.slug,
+			target,
+			release.registration_id,
+			release.origin,
+		);
+		const clear = vi
+			.spyOn(services.deepLinks, 'clearPublicOrigin')
+			.mockRejectedValueOnce(new Error('Unreadable legacy pointer'));
+		try {
+			await releases.requestUnpublish(release.release_id, 'user');
+			expect(clear).not.toHaveBeenCalled();
+			expect(await approvedOrigin()).toBeNull();
+			expect(await releases.advance(release.release_id, 'worker-a')).toMatchObject({
+				state: 'unpublished',
+			});
+			expect(host.services.has(release.service_name)).toBe(false);
+			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBe(release.origin);
+			await releases.reconcileTick('worker-a');
+			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBeNull();
+		} finally {
+			clear.mockRestore();
+		}
 	});
 
 	it('indexes the release before uploading and cleans up a partial bundle', async () => {

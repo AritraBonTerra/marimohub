@@ -172,17 +172,23 @@ async function setLegacyPublicOrigin(
 	if (origin === null) {
 		// No label check: an owner must be able to stop a release that was labeled later.
 		const attached = current.public_origin;
-		const legacy = attached && !(managed && isManaged(attached)) ? attached : null;
-		if (!legacy) {
-			// Never report a disconnect for a reserved managed name or a live managed release.
-			if (
-				attached ||
-				(managed && typeof (await managed.resolveManagedOrigin(current)) === 'string')
-			)
-				throw new ConflictError('Unpublish the managed public dashboard instead');
-			return withManagedOrigin(deps, current);
-		}
-		await deps.services.deepLinks.clearPublicOrigin(slug, target, current.registration_id, legacy);
+		if (
+			(attached && isManaged(attached)) ||
+			(!attached && managed && typeof (await managed.resolveManagedOrigin(current)) === 'string')
+		)
+			throw new ConflictError('Unpublish the managed public dashboard instead');
+		if (attached === null) return withManagedOrigin(deps, current);
+		// Undefined allows the server's configured fallback. Fence that fallback with an
+		// explicit null, without clearing a manual URL attached in the meantime.
+		if (
+			!(await deps.services.deepLinks.clearPublicOrigin(
+				slug,
+				target,
+				current.registration_id,
+				attached,
+			))
+		)
+			throw new ConflictError('The app link changed; refresh before disconnecting it');
 		link = { ...current, public_origin: null };
 	} else {
 		if (managed)

@@ -364,9 +364,17 @@ export class PublicReleaseService {
 		throw new ConflictError('Public release capacity changed concurrently; try again');
 	}
 
-	private async liveReleases(): Promise<PublicReleaseRecord[]> {
+	private async liveReleases(skipUnreadable = false): Promise<PublicReleaseRecord[]> {
 		const { ids } = await this.readLiveIndex();
-		const records = await mapWithConcurrency(ids, 8, (id) => this.getRelease(id));
+		const records = await mapWithConcurrency(ids, 8, async (id) => {
+			try {
+				return await this.getRelease(id);
+			} catch (error) {
+				if (!skipUnreadable) throw error;
+				logOperationalError('public_release_list_read_failed', { release_id: id }, error);
+				return null;
+			}
+		});
 		return records.filter(
 			(record): record is PublicReleaseRecord => record !== null && !isTerminal(record),
 		);
@@ -423,7 +431,7 @@ export class PublicReleaseService {
 		const target: DeepLinkTarget = { kind: 'app', project_id: projectId, notebook_id: notebookId };
 		const [links, live] = await Promise.all([
 			this.deps.deepLinks.list(target),
-			this.liveReleases(),
+			this.liveReleases(true),
 		]);
 		return mapWithConcurrency(links, 4, async (link) => {
 			const head = (await this.readHead(link.registration_id))?.head;
@@ -432,9 +440,11 @@ export class PublicReleaseService {
 					(id): id is string => typeof id === 'string',
 				),
 			);
-			for (const record of live)
-				if (record.registration_id === link.registration_id) ids.add(record.release_id);
-			const releases = (await mapWithConcurrency([...ids], 4, (id) => this.getRelease(id)))
+			const headRecords = await mapWithConcurrency([...ids], 4, (id) => this.getRelease(id));
+			const incidental = live.filter(
+				(record) => record.registration_id === link.registration_id && !ids.has(record.release_id),
+			);
+			const releases = [...headRecords, ...incidental]
 				.filter(
 					(record): record is PublicReleaseRecord =>
 						record !== null && sameTarget(record.target, target),
@@ -782,7 +792,6 @@ export class PublicReleaseService {
 					)
 						throw new ConflictError('The dashboard has changed; refresh before unpublishing');
 				}
-				await this.clearLink(record);
 				return record;
 			}
 			if (reason !== 'republish_superseded') {
@@ -794,16 +803,27 @@ export class PublicReleaseService {
 						const isPending = head.pending_release_id === releaseId;
 						if (reason === 'user' && !isActive && !isPending)
 							throw new ConflictError('The dashboard has changed; refresh before unpublishing');
-						if (reason === 'user' && isActive && head.pending_release_id)
+						if (
+							reason === 'user' &&
+							isActive &&
+							head.pending_release_id &&
+							head.cancelling_release_id !== head.pending_release_id &&
+							head.withdrawing_release_id !== head.pending_release_id
+						)
 							throw new ConflictError('Cancel the replacement before unpublishing this dashboard');
 						if (isActive)
 							return {
 								...head,
 								managed_activated: true,
 								withdrawing_release_id: releaseId,
+								// Preserve the cancellation fence written by older workers.
+								cancelling_release_id:
+									head.withdrawing_release_id === head.pending_release_id
+										? head.withdrawing_release_id
+										: head.cancelling_release_id,
 							};
-						return isPending && !head.withdrawing_release_id
-							? { ...head, withdrawing_release_id: releaseId }
+						return isPending && head.cancelling_release_id !== releaseId
+							? { ...head, cancelling_release_id: releaseId }
 							: null;
 					},
 				);
@@ -825,7 +845,6 @@ export class PublicReleaseService {
 				next_retry_at: undefined,
 			});
 			if (!next) continue;
-			await this.clearLink(next.record);
 			await this.event('unpublish_requested', next.record, actor, { reason });
 			return next.record;
 		}
@@ -1086,7 +1105,6 @@ export class PublicReleaseService {
 			next_retry_at: undefined,
 			...(error ? { error } : {}),
 		});
-		if (next) await this.clearLink(next.record);
 		return next;
 	}
 
@@ -1124,7 +1142,10 @@ export class PublicReleaseService {
 		}
 		const { record } = current;
 		const head = (await this.readHead(record.registration_id))?.head;
-		if (head?.withdrawing_release_id === record.release_id)
+		if (
+			head?.withdrawing_release_id === record.release_id ||
+			head?.cancelling_release_id === record.release_id
+		)
 			return this.withdrawFromStep(current, 'user');
 		if (record.staging || head?.pending_release_id !== record.release_id) return null;
 		const reason = await this.invalidation(record);
@@ -1204,7 +1225,11 @@ export class PublicReleaseService {
 			(head) => {
 				previous = null;
 				activated = false;
-				if (head.pending_release_id !== record.release_id || head.withdrawing_release_id)
+				if (
+					head.pending_release_id !== record.release_id ||
+					head.withdrawing_release_id ||
+					head.cancelling_release_id === record.release_id
+				)
 					return null;
 				previous = head.active_release_id;
 				activated = true;
@@ -1217,7 +1242,10 @@ export class PublicReleaseService {
 				};
 			},
 		);
-		if (result?.withdrawing_release_id === record.release_id) {
+		if (
+			result?.withdrawing_release_id === record.release_id ||
+			result?.cancelling_release_id === record.release_id
+		) {
 			await this.requestUnpublish(record.release_id, 'user');
 			return null;
 		}
@@ -1249,7 +1277,6 @@ export class PublicReleaseService {
 
 	private async stepUnpublishing(current: Stored, signal: AbortSignal): Promise<Step> {
 		const { record } = current;
-		await this.clearLink(record);
 		const revoked = await this.host.revoke({
 			releaseId: record.release_id,
 			serviceName: record.service_name,
@@ -1265,7 +1292,6 @@ export class PublicReleaseService {
 			await this.write(current, { ...record, next_retry_at: retryAt });
 			return null;
 		}
-		await this.clearLink(record);
 		const terminal = await this.write(current, {
 			...record,
 			state: record.activated_at ? 'unpublished' : 'failed',
@@ -1298,6 +1324,7 @@ export class PublicReleaseService {
 				head.active_release_id !== record.release_id &&
 				head.pending_release_id !== record.release_id &&
 				head.withdrawing_release_id !== record.release_id &&
+				head.cancelling_release_id !== record.release_id &&
 				head.last_release_id === record.release_id
 					? null
 					: {
@@ -1310,6 +1337,10 @@ export class PublicReleaseService {
 								head.withdrawing_release_id === record.release_id
 									? undefined
 									: head.withdrawing_release_id,
+							cancelling_release_id:
+								head.cancelling_release_id === record.release_id
+									? undefined
+									: head.cancelling_release_id,
 							last_release_id: record.release_id,
 						},
 		);
@@ -1327,6 +1358,9 @@ export class PublicReleaseService {
 				);
 			}
 		}
+		// A legacy pointer is cleanup only. Even a malformed link must not delay Cloud Run
+		// revocation. Keeping the terminal record indexed makes this cleanup retryable.
+		await this.clearLink(record);
 		await this.updateLiveIndex(record.release_id, false);
 	}
 }

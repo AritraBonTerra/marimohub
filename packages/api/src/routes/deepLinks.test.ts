@@ -93,6 +93,44 @@ describe('App link routes', () => {
 		).toMatchObject({ public_origin: null });
 	});
 
+	it('disables the configured fallback without replacing a concurrently attached origin', async () => {
+		const link = await createLink();
+		const configured = createTestApi({
+			bucket: api.bucket,
+			deps: { publicAppReleaseHostSuffix: '-123.us-west1.run.app' },
+		});
+		const disconnect = () =>
+			configured.request('POST', base, {
+				slug: link.slug,
+				publication: { registration_id: link.registration_id, origin: null },
+			});
+		expect(link.public_origin).toBeUndefined();
+		const service = configured.deps.services.deepLinks;
+		const clear = service.clearPublicOrigin.bind(service);
+		const origin = 'https://marimo-public-legacy-123.us-west1.run.app';
+		vi.spyOn(service, 'clearPublicOrigin').mockImplementationOnce(async (...args) => {
+			await service.setPublicOrigin(link.slug, target, link.registration_id, origin);
+			return clear(...args);
+		});
+		await expectError(await disconnect(), 409);
+		expect((await service.resolve(link.slug)).public_origin).toBe(origin);
+		await expectOk(await disconnect());
+		expect((await service.resolve(link.slug)).public_origin).toBeNull();
+
+		const fallback = await expectOk<DeepLink>(
+			await api.request('POST', base, { slug: 'fallback' }),
+		);
+		expect(
+			await expectOk(
+				await configured.request('POST', base, {
+					slug: fallback.slug,
+					publication: { registration_id: fallback.registration_id, origin: null },
+				}),
+			),
+		).toMatchObject({ public_origin: null });
+		expect((await service.resolve(fallback.slug)).public_origin).toBeNull();
+	});
+
 	it('limits legacy release URLs to owner browser sessions on unlabeled notebooks, with audit', async () => {
 		const link = await createLink();
 		const suffix = '-123.us-west1.run.app';

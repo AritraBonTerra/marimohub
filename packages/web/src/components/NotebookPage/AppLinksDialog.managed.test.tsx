@@ -329,6 +329,7 @@ describe('AppLinksDialog managed publishing', () => {
 			candidate.release_id,
 			live.release_id,
 		]);
+		expect(await screen.findByText('Stopping public dashboard…')).toBeVisible();
 	});
 
 	it('lets a hub admin without a publish grant stop a live release', async () => {

@@ -513,6 +513,23 @@ describe('CloudRunPublicReleaseHost', () => {
 		});
 	});
 
+	it.each([
+		['publisher runtime identity', 'service_account_mismatch'],
+		['different release', 'service_conflict'],
+	] as const)('refuses to expose a service with %s', async (scenario, code) => {
+		await host.deployPrivate(deployInput());
+		google.markReady();
+		const service = google.services.get(SERVICE)!;
+		if (scenario === 'publisher runtime identity')
+			(service.template as { serviceAccount: string }).serviceAccount =
+				'mh-publisher@proj.iam.gserviceaccount.com';
+		else (service.labels as Record<string, string>)['marimohub-release-id'] = 'other';
+		await expect(
+			host.expose({ releaseId: RELEASE_ID, serviceName: SERVICE, origin: ORIGIN }),
+		).rejects.toMatchObject({ code });
+		expect(google.iamWrites).toEqual([]);
+	});
+
 	it('preserves conditional bindings and only treats unconditional allUsers as exposed', async () => {
 		await host.deployPrivate(deployInput());
 		google.markReady();
