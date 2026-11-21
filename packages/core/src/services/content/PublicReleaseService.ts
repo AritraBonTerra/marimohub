@@ -621,7 +621,6 @@ export class PublicReleaseService {
 		});
 
 		const staleCandidates: string[] = [];
-		let claimed = false;
 		let reserved = false;
 		try {
 			await this.updateLiveIndex(releaseId, true);
@@ -648,12 +647,15 @@ export class PublicReleaseService {
 					return { ...head, slug: link.slug, target, pending_release_id: releaseId };
 				},
 			);
-			claimed = true;
-		} finally {
-			if (!claimed) {
-				if (reserved) await this.requestUnpublish(releaseId, 'publish_failed');
-				else await this.abandon(releaseId);
+		} catch (error) {
+			if (!reserved || error instanceof ConflictError) {
+				await this.abandon(releaseId);
+				if (reserved) await this.updateLiveIndex(releaseId, false);
+			} else {
+				// The head update might have committed. Reconcile withdrawal before freeing the slot.
+				await this.requestUnpublish(releaseId, 'publish_failed');
 			}
+			throw error;
 		}
 		for (const stale of staleCandidates) await this.abandon(stale);
 		await this.event('publish_requested', record, input.actor, { version_id: input.versionId });
@@ -697,6 +699,12 @@ export class PublicReleaseService {
 			if (!current) throw new NotFoundError('Public release not found');
 			const { record } = current;
 			if (isTerminal(record) || record.state === 'unpublishing') {
+				if (reason === 'user' && record.activated_at) {
+					const head = (await this.readHead(record.registration_id))?.head;
+					const replacement = head?.pending_release_id ?? head?.active_release_id;
+					if (replacement && replacement !== releaseId)
+						throw new ConflictError('The dashboard has changed; refresh before unpublishing');
+				}
 				await this.clearLink(record);
 				return record;
 			}

@@ -1,5 +1,5 @@
 import { gzipSync } from 'fflate';
-import { splitReleaseTarPath } from '@marimo-hub/core';
+import { splitReleaseTarPath } from '@marimo-hub/core/public-releases';
 import { PublicReleaseHostFatalError } from '@marimo-hub/core/ports/public-release-host';
 import type { PublicReleaseBundleFile } from '@marimo-hub/core/ports/public-release-host';
 

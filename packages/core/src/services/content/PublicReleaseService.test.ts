@@ -280,8 +280,10 @@ describe('PublicReleaseService', () => {
 	});
 
 	it('allows one in-flight publish per link', async () => {
-		await publish();
+		const release = await publish();
 		await expect(publish()).rejects.toBeInstanceOf(ConflictError);
+		const [entry] = await releases.listForNotebook(target.project_id, target.notebook_id);
+		expect(entry.releases.map((record) => record.release_id)).toEqual([release.release_id]);
 	});
 
 	it('keeps the old release live until the new one takes over, then retires it', async () => {
@@ -302,6 +304,9 @@ describe('PublicReleaseService', () => {
 			withdraw_reason: 'republish_superseded',
 		});
 		expect(await settle(first.release_id)).toMatchObject({ state: 'unpublished' });
+		await expect(releases.requestUnpublish(first.release_id, 'user')).rejects.toThrow(
+			'The dashboard has changed',
+		);
 		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(second.origin);
 		expect(host.services.has(first.service_name)).toBe(false);
 	});
