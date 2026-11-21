@@ -266,7 +266,7 @@ export class PublicReleaseService {
 		throw new ConflictError('Public release state changed concurrently; try again');
 	}
 
-	private async readLiveIndex() {
+	private async readLiveIndex(): Promise<{ ids: string[]; etag?: string }> {
 		const key = paths.publicReleaseLiveIndex;
 		const object = await this.bucket.get(key);
 		if (!object) return { ids: [], etag: undefined };
