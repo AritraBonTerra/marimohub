@@ -109,6 +109,7 @@ import { parseAppPoolPolicy } from './appPool';
 import { makeWif } from './wif';
 import { makeSandboxUserHome } from './userHome';
 import { parseWarmPoolConfig } from './warmPool';
+import { makePublicReleases } from './publicRelease';
 
 import type { Env } from './env';
 import { parseSandboxAuth } from './sandboxAuth';
@@ -729,6 +730,7 @@ export function createFromEnv(
 	const sourceControlAccounts = makeSourceControlAccounts(env, bucket);
 	const sourceControlConfig = makeSourceControl(env, sourceControlAccounts.githubAccounts, bucket);
 	const workspaceLimits = parseWorkspaceLimits(env);
+	const publicReleases = makePublicReleases(env);
 	const services = createServices(
 		{
 			...hubStorage,
@@ -742,6 +744,7 @@ export function createFromEnv(
 		metrics,
 		{
 			workspaceLimits,
+			publicReleases,
 			backgroundWork: options?.backgroundWork,
 			tracing: options?.tracing,
 			repositoryHosts: sourceControlConfig.sourceControl?.repositoryHosts,
@@ -798,6 +801,8 @@ export function createFromEnv(
 	);
 	const dataQuery = dataQueryFromEnv(env, duckdbHttpSessionFactory, metrics);
 	const deps: ApiDeps = {
+		publicAppReleaseHostSuffix:
+			publicReleases?.host.hostSuffix ?? env.MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX,
 		storageLifecycle: { ready: () => hubStorage.ready(), close: () => hubStorage.close() },
 		workspaceLimits,
 		warmPool: warmPool

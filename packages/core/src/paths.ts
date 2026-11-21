@@ -306,6 +306,16 @@ export const paths = {
 	notebookMoves: '_system/notebook-moves/',
 	notebookMove: (nid: NotebookId) => `_system/notebook-moves/${nid}.json`,
 	deepLink: (slug: string) => `_system/deep-links/${slug}.json`,
+	publicReleasesPrefix: '_system/public-releases/',
+	publicRelease: (releaseId: string) => `_system/public-releases/${releaseId}.json`,
+	publicReleaseBundlePrefix: (releaseId: string) => `_system/public-releases/${releaseId}/bundle/`,
+	publicReleaseBundleFile: (releaseId: string, rel: string) =>
+		`_system/public-releases/${releaseId}/bundle/${rel}`,
+	publicReleaseHead: (registrationId: string) =>
+		`_system/public-release-heads/${registrationId}.json`,
+	/** CAS-managed reservations for releases that still need reconciliation. */
+	publicReleaseLiveIndex: '_system/public-release-live/index.json',
+	publicReleasesLock: '_system/_public_releases.lock',
 	catalog: '_system/catalog.json',
 	snapshot: (id: SnapshotId) => `_system/snapshots/${id}.json`,
 	snapshotsPrefix: '_system/snapshots/',

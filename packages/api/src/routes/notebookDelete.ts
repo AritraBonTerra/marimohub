@@ -37,6 +37,11 @@ export async function deleteNotebookAndRetire(
 				}),
 		);
 	}
+	await deps.services.publicReleases?.withdrawTarget(
+		{ projectId: project.id, notebookId },
+		'target_deleted',
+		user.id,
+	);
 	await retireNotebookPreviews(deps, project.id, notebookId);
 	await deferTeardown(
 		deps,

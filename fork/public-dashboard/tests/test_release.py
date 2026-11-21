@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 import socket
@@ -35,6 +36,27 @@ def _(district, mo):
 """
 
 
+def seal(release):
+    """Write release.json and make the tree read-only, as a managed release image does."""
+    files = sorted(p for p in release.rglob("*") if p.is_file())
+    manifest = {
+        "schema_version": 1,
+        "release_id": "01JRELEASE0000000000000000",
+        "entrypoint": "notebook.py",
+        "files": [
+            {
+                "path": p.relative_to(release).as_posix(),
+                "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                "size_bytes": p.stat().st_size,
+            }
+            for p in files
+        ],
+    }
+    (release / "release.json").write_text(json.dumps(manifest))
+    for path in [*release.rglob("*"), release]:
+        path.chmod(0o555 if path.is_dir() else 0o444)
+
+
 def fetch(origin, path, session, *, token="", body=None):
     request = Request(
         origin + path,
@@ -56,11 +78,18 @@ def fetch(origin, path, session, *, token="", body=None):
 
 @contextmanager
 def live_release(
-    tmp_path, *, connection_seconds=270, max_connections=12, notebook=NOTEBOOK
+    tmp_path,
+    *,
+    connection_seconds=270,
+    max_connections=12,
+    notebook=NOTEBOOK,
+    sealed=False,
 ):
     (tmp_path / "notebook.py").write_text(notebook)
     (tmp_path / "public").mkdir()
     (tmp_path / "public" / "approved.jpg").write_bytes(b"approved-photo-bytes")
+    if sealed:
+        seal(tmp_path)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -79,7 +108,7 @@ def live_release(
         env={
             "PUBLIC_DASHBOARD_ORIGIN": origin,
             "PUBLIC_DASHBOARD_RELEASE": str(tmp_path),
-            "HOME": str(tmp_path),
+            "HOME": str(tmp_path.parent if sealed else tmp_path),
             "MARIMO_SKIP_UPDATE_CHECK": "1",
         },
     ) as process:
@@ -140,6 +169,23 @@ def test_live_release_is_interactive_without_exposing_source(tmp_path):
             b"approved-photo-bytes",
         )
         assert fetch(origin, "/api/files/download?path=notebook.py", session)[0] == 404
+
+
+def test_sealed_read_only_release_is_interactive(tmp_path):
+    release = tmp_path / "release"
+    release.mkdir()
+    try:
+        with live_release(release, sealed=True) as origin:
+            session = str(uuid4())
+            status, html = fetch(origin, "/", session)
+            assert status == 200
+            token = re.search(rb'<marimo-server-token data-token="([^"]+)"', html)
+            assert token
+            asyncio.run(check_widget(origin, session, token[1].decode()))
+            assert fetch(origin, "/release.json", session)[0] == 404
+    finally:
+        for path in [release, *release.rglob("*")]:
+            path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 def test_live_socket_sends_close_at_its_deadline(tmp_path):

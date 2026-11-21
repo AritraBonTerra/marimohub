@@ -74,11 +74,15 @@ export function useRegisterDeepLink(pid: string, nid: string) {
 	const client = useQueryClient();
 	return useMutation({
 		meta: { suppressErrorToast: true },
-		mutationFn: (slug: string) =>
+		mutationFn: (
+			input:
+				| string
+				| { slug: string; publication: { registration_id: string; origin: string | null } },
+		) =>
 			apiData(
 				apiClient.POST('/api/v1/projects/{pid}/notebooks/{nid}/deep-links', {
 					params: { path: { pid, nid } },
-					body: { slug },
+					body: typeof input === 'string' ? { slug: input } : input,
 				}),
 			),
 		onSuccess: () => client.invalidateQueries({ queryKey: ['deep-links'] }),

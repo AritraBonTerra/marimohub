@@ -459,3 +459,22 @@ export function startSearchIndexing(
 		},
 	}).stop;
 }
+
+/** Leased reconciler for managed public releases. Idle ticks only read the live index. */
+export function startPublicReleases(
+	deps: ApiDeps,
+	loops = new BackgroundLoops(),
+): (() => void) | undefined {
+	const service = deps.services.publicReleases;
+	if (!service) return undefined;
+	return loops.start({
+		name: 'public_releases',
+		intervalMs: Millis.seconds(5),
+		deadlineMs: Millis.seconds(60),
+		abortOnStop: true,
+		retainLease: true,
+		lock: maintenanceLock(deps, paths.publicReleasesLock),
+		shouldRun: () => service.shouldRun(),
+		run: ({ holder, signal }) => service.reconcileTick(holder ?? 'public-releases', signal),
+	}).stop;
+}

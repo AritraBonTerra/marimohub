@@ -1648,6 +1648,13 @@ async function mutateNotebookSecurityLabels(
 		user.id,
 		ifMatchToken(c) ?? existing.meta.updated_at,
 	);
+	// Labeled content is never public; the reconciler withdraws too if this is interrupted.
+	if (labels !== undefined)
+		await deps.services.publicReleases?.withdrawTarget(
+			{ projectId: pid, notebookId: nid },
+			'security_labeled',
+			user.id,
+		);
 	c.header('ETag', etagFor(meta.updated_at));
 	return c.json({ success: true, data: toPublicNotebookMeta(meta) }, 200);
 }

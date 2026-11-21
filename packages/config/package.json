@@ -56,6 +56,7 @@
 		"@marimo-hub/object-browser-gcs": "workspace:*",
 		"@marimo-hub/object-browser-s3": "workspace:*",
 		"@marimo-hub/postgres-runtime": "workspace:*",
+		"@marimo-hub/publish-cloudrun": "workspace:*",
 		"@marimo-hub/search-bucket": "workspace:*",
 		"@marimo-hub/secrets-aws": "workspace:*",
 		"@marimo-hub/secrets-kubernetes": "workspace:*",

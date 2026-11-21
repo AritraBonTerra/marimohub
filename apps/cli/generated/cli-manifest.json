@@ -879,6 +879,13 @@
 						"repeatable": false
 					},
 					{
+						"name": "publication",
+						"cli_name": "publication",
+						"required": false,
+						"value_type": "object",
+						"repeatable": false
+					},
+					{
 						"name": "slug",
 						"cli_name": "slug",
 						"required": true,
@@ -6162,6 +6169,36 @@
 			"accepts_if_match": true,
 			"accepts_idempotency_key": false,
 			"preflight_operation_id": "projects.get"
+		},
+		{
+			"id": "public-releases.list",
+			"command": ["public-releases", "list"],
+			"method": "GET",
+			"path": "/api/v1/projects/{pid}/notebooks/{nid}/public-releases",
+			"summary": "List managed public releases for each app link of a notebook",
+			"parameters": [
+				{
+					"name": "nid",
+					"cli_name": "nid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "pid",
+					"cli_name": "pid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				}
+			],
+			"destructive": false,
+			"paginated": false,
+			"response_kind": "json",
+			"accepts_if_match": false,
+			"accepts_idempotency_key": false
 		},
 		{
 			"id": "putObjectUploadPart",

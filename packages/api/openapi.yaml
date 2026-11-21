@@ -273,6 +273,46 @@ components:
             - change_request_providers
             - sync_providers
             - pull_source_providers
+        public_app_links:
+          type: object
+          properties:
+            available:
+              type: boolean
+            mode:
+              type: string
+              enum:
+                - managed
+                - manual
+                - disabled
+              description: '`managed` publishes from the app link dialog; `manual` accepts an
+                approved release URL; `disabled` keeps app links private.'
+            max_live_releases:
+              type:
+                - integer
+                - 'null'
+              exclusiveMinimum: 0
+            max_assets:
+              type:
+                - integer
+                - 'null'
+              exclusiveMinimum: 0
+            max_asset_bytes:
+              type:
+                - integer
+                - 'null'
+              exclusiveMinimum: 0
+            max_total_asset_bytes:
+              type:
+                - integer
+                - 'null'
+              exclusiveMinimum: 0
+          required:
+            - available
+            - mode
+            - max_live_releases
+            - max_assets
+            - max_asset_bytes
+            - max_total_asset_bytes
         project_alerts:
           type: object
           properties:
@@ -3320,6 +3360,10 @@ components:
           required:
             - mode
           additionalProperties: false
+        public_origin:
+          type:
+            - string
+            - 'null'
         created_by:
           type: string
         created_at:
@@ -3333,6 +3377,118 @@ components:
         - access
         - created_by
         - created_at
+      additionalProperties: false
+    PublicRelease:
+      type: object
+      properties:
+        release_id:
+          type: string
+          format: ulid
+        slug:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?![\s\S])
+        registration_id:
+          type: string
+          format: ulid
+        version_id:
+          type: string
+        entrypoint:
+          type: string
+          minLength: 1
+        code_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        assets:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              sha256:
+                type: string
+                pattern: ^[0-9a-f]{64}$
+              size_bytes:
+                type: integer
+                minimum: 0
+              exposure:
+                type: string
+                enum:
+                  - public_http
+                  - runtime_only
+            required:
+              - path
+              - sha256
+              - size_bytes
+              - exposure
+            additionalProperties: false
+        origin:
+          type: string
+        state:
+          type: string
+          enum:
+            - publishing
+            - exposing
+            - active
+            - unpublishing
+            - unpublished
+            - failed
+        withdraw_requested:
+          type: boolean
+        withdraw_reason:
+          type: string
+          enum:
+            - user
+            - republish_superseded
+            - target_deleted
+            - security_labeled
+            - link_changed
+            - publish_failed
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+            - code
+            - message
+        image_digest:
+          type: string
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: string
+          format: date-time
+        unpublish_requested_at:
+          type: string
+          format: date-time
+        unpublished_at:
+          type: string
+          format: date-time
+      required:
+        - release_id
+        - slug
+        - registration_id
+        - version_id
+        - entrypoint
+        - code_sha256
+        - assets
+        - origin
+        - state
+        - withdraw_requested
+        - created_by
+        - created_at
+        - updated_at
       additionalProperties: false
     SearchResponse:
       type: object
@@ -15471,6 +15627,10 @@ paths:
                         required:
                           - mode
                         additionalProperties: false
+                      public_origin:
+                        type:
+                          - string
+                          - 'null'
                       created_by:
                         type: string
                       created_at:
@@ -15808,6 +15968,19 @@ paths:
                   required:
                     - mode
                   additionalProperties: false
+                publication:
+                  type: object
+                  properties:
+                    registration_id:
+                      type: string
+                      format: ulid
+                    origin:
+                      type:
+                        - string
+                        - 'null'
+                  required:
+                    - registration_id
+                    - origin
               required:
                 - slug
               additionalProperties: false
@@ -15825,6 +15998,537 @@ paths:
                       - true
                   data:
                     $ref: '#/components/schemas/DeepLink'
+                required:
+                  - success
+                  - data
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{pid}/notebooks/{nid}/public-releases:
+    get:
+      operationId: public-releases.list
+      tags:
+        - App links
+      summary: List managed public releases for each app link of a notebook
+      parameters:
+        - schema:
+            type: string
+            pattern: ^proj-[0-9a-z]{16}$
+            example: proj-7h2k9qm4xz7rp3w8
+          required: true
+          name: pid
+          in: path
+        - schema:
+            type: string
+            pattern: ^nb-[0-9a-z]{16}$
+            example: nb-3w8h2k9qm4xz7rp3
+          required: true
+          name: nid
+          in: path
+      responses:
+        '200':
+          description: Releases per app link, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        registration_id:
+                          type: string
+                          format: ulid
+                        slug:
+                          type: string
+                          minLength: 1
+                          maxLength: 63
+                          pattern: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?![\s\S])
+                        active_release_id:
+                          type:
+                            - string
+                            - 'null'
+                          format: ulid
+                        pending_release_id:
+                          type:
+                            - string
+                            - 'null'
+                          format: ulid
+                        releases:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/PublicRelease'
+                      required:
+                        - registration_id
+                        - slug
+                        - active_release_id
+                        - pending_release_id
+                        - releases
+                      additionalProperties: false
+                required:
+                  - success
+                  - data
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      operationId: public-releases.publish
+      tags:
+        - App links
+      summary: Publish a saved notebook version as an anonymous public dashboard
+      description: Freezes the version and the approved files, then deploys them
+        privately before granting anonymous access. The app link keeps its
+        current target until the new release answers anonymously. Browser
+        sessions only.
+      security: *a5
+      parameters:
+        - schema:
+            type: string
+            pattern: ^proj-[0-9a-z]{16}$
+            example: proj-7h2k9qm4xz7rp3w8
+          required: true
+          name: pid
+          in: path
+        - schema:
+            type: string
+            pattern: ^nb-[0-9a-z]{16}$
+            example: nb-3w8h2k9qm4xz7rp3
+          required: true
+          name: nid
+          in: path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                slug:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?![\s\S])
+                registration_id:
+                  type: string
+                  format: ulid
+                version_id:
+                  type: string
+                assets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      path:
+                        type: string
+                      sha256:
+                        type: string
+                        pattern: ^[0-9a-f]{64}$
+                      size_bytes:
+                        type: integer
+                        minimum: 0
+                    required:
+                      - path
+                      - sha256
+                      - size_bytes
+                    additionalProperties: false
+                  default: []
+              required:
+                - slug
+                - registration_id
+                - version_id
+              additionalProperties: false
+      responses:
+        '202':
+          description: Release queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/PublicRelease'
+                required:
+                  - success
+                  - data
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{pid}/notebooks/{nid}/public-releases/assets:
+    get:
+      operationId: public-releases.assets
+      tags:
+        - App links
+      summary: List workspace files that can be approved for a public release
+      description: Hidden files, generated caches, the notebook entrypoint and
+        `pyproject.toml` are never listed. Only photos under `public/` are
+        web-served; other files are readable from Python only.
+      security: *a5
+      parameters:
+        - schema:
+            type: string
+            pattern: ^proj-[0-9a-z]{16}$
+            example: proj-7h2k9qm4xz7rp3w8
+          required: true
+          name: pid
+          in: path
+        - schema:
+            type: string
+            pattern: ^nb-[0-9a-z]{16}$
+            example: nb-3w8h2k9qm4xz7rp3
+          required: true
+          name: nid
+          in: path
+        - schema:
+            type: string
+          required: true
+          name: version_id
+          in: query
+      responses:
+        '200':
+          description: Candidate files with their current hashes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    properties:
+                      version_id:
+                        type: string
+                      entrypoint:
+                        type: string
+                      assets:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            path:
+                              type: string
+                            size_bytes:
+                              type: integer
+                              minimum: 0
+                            sha256:
+                              type:
+                                - string
+                                - 'null'
+                              pattern: ^[0-9a-f]{64}$
+                            exposure:
+                              type: string
+                              enum:
+                                - public_http
+                                - runtime_only
+                            selectable:
+                              type: boolean
+                            reason:
+                              type: string
+                              enum:
+                                - exceeds_max_file_bytes
+                          required:
+                            - path
+                            - size_bytes
+                            - sha256
+                            - exposure
+                            - selectable
+                          additionalProperties: false
+                    required:
+                      - version_id
+                      - entrypoint
+                      - assets
+                    additionalProperties: false
+                required:
+                  - success
+                  - data
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{pid}/notebooks/{nid}/public-releases/{release_id}/unpublish:
+    post:
+      operationId: public-releases.unpublish
+      tags:
+        - App links
+      summary: Stop a public dashboard
+      description: Clears the app link redirect immediately. Returns 200 once the host
+        confirms the direct release URL refuses anonymous visitors, or 202 while
+        revocation continues in the background.
+      security: *a5
+      parameters:
+        - schema:
+            type: string
+            pattern: ^proj-[0-9a-z]{16}$
+            example: proj-7h2k9qm4xz7rp3w8
+          required: true
+          name: pid
+          in: path
+        - schema:
+            type: string
+            pattern: ^nb-[0-9a-z]{16}$
+            example: nb-3w8h2k9qm4xz7rp3
+          required: true
+          name: nid
+          in: path
+        - schema:
+            type: string
+            format: ulid
+          required: true
+          name: release_id
+          in: path
+      responses:
+        '200':
+          description: Release revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/PublicRelease'
+                required:
+                  - success
+                  - data
+        '202':
+          description: Revocation in progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/PublicRelease'
                 required:
                   - success
                   - data

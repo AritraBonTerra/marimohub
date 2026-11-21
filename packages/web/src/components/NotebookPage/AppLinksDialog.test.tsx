@@ -18,7 +18,7 @@ function setup(
 	failures: { list?: boolean; release?: boolean } = {},
 	search = '',
 ) {
-	let links = [saved];
+	let links: (typeof saved & { public_origin?: string | null })[] = [saved];
 	const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 		if (init?.method === 'POST') {
 			if (conflict)
@@ -29,7 +29,18 @@ function setup(
 					}),
 					{ status: 409, headers: { 'content-type': 'application/json' } },
 				);
-			const { slug } = JSON.parse(String(init.body)) as { slug: string };
+			const { slug, publication } = JSON.parse(String(init.body)) as {
+				slug: string;
+				publication?: { registration_id: string; origin: string | null };
+			};
+			if (publication) {
+				links = links.map((link) =>
+					link.registration_id === publication.registration_id
+						? { ...link, public_origin: publication.origin }
+						: link,
+				);
+				return ok(links.find((link) => link.registration_id === publication.registration_id));
+			}
 			const link = { slug, registration_id: '01ARZ3NDEKTSV4RRFFQ69G5FAW' };
 			links = [...links, link];
 			return ok(link);
@@ -111,6 +122,34 @@ describe('AppLinksDialog', () => {
 			'/deep-links/team%2Foverview?registration_id=',
 		);
 		expect(screen.getByRole('button', { name: 'Copy sales' })).toBeInTheDocument();
+	});
+
+	it('publishes an existing link and can make it private again', async () => {
+		const user = setupUser();
+		const fetch = setup();
+		await user.click(await screen.findByRole('button', { name: 'Publish' }));
+		await user.type(
+			screen.getByRole('textbox', { name: 'Public release URL' }),
+			'https://marimo-public-sales-123.us-west1.run.app/',
+		);
+		await user.click(screen.getByRole('button', { name: 'Publish link' }));
+		await user.click(await screen.findByRole('button', { name: 'Manage publication' }));
+		await user.click(screen.getByRole('button', { name: 'Disconnect public release' }));
+		await screen.findByRole('button', { name: 'Publish' });
+		expect(
+			fetch.mock.calls
+				.filter(([, init]) => init?.method === 'POST')
+				.map(([, init]) => JSON.parse(String(init?.body))),
+		).toEqual([
+			{
+				slug: saved.slug,
+				publication: {
+					registration_id: saved.registration_id,
+					origin: 'https://marimo-public-sales-123.us-west1.run.app',
+				},
+			},
+			{ slug: saved.slug, publication: { registration_id: saved.registration_id, origin: null } },
+		]);
 	});
 
 	it.each([

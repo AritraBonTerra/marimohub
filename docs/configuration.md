@@ -495,6 +495,8 @@ Server-wide settings; no backend selector.
 | `MARIMOHUB_APP_BASE_URL` | Public URL for browser links and the Node SPA base path. When the app uses a path prefix, set this variable. If unset, links use the request origin and the SPA uses `/`. | — | — | `https://hub.example.com/marimohub` |
 | `MARIMOHUB_PROJECT_NOTEBOOK_TARGET` | Notebook links in project lists and galleries open `notebook` or `app`. Users without app permission open the notebook page. In `app` mode, editors also see an Edit link. | — | `notebook` | `app` |
 | `MARIMOHUB_STATIC_ROOT` | Directory containing the web UI's static files. | — | `./public` | — |
+| `MARIMOHUB_PUBLIC_APP_RELEASES` | JSON map from an app slug to its registration ID and public release origin. | — | — | — |
+| `MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX` | Cloud Run suffix for release URLs connected through the app link dialog. Release service names start with `marimo-public-`. | — | — | `-123456789.us-west1.run.app` |
 | `MARIMOHUB_RUN_MAINTENANCE` | Run background maintenance (expiring old sessions, cleaning up sandboxes) on this replica only. | — | `false` | `true` |
 | `MARIMOHUB_SHUTDOWN_TIMEOUT_SECONDS` | Shutdown drain budget (1–86400 seconds): 180 for API replicas, 120 for maintenance. Set the termination grace at least 20 seconds longer. | — | — | `120` |
 | `MARIMOHUB_MAX_SESSIONS_PER_USER` | Per-user concurrent session cap (`0` = unlimited). Counts `edit` sessions, and separately bounds the apps a single user may have started — the cost ceiling a user cannot escape by fanning apps out across projects (apps are also capped per project via `MARIMOHUB_MAX_APPS_PER_PROJECT`). | — | `10` | — |
@@ -788,6 +790,39 @@ Posts the complete notification as signed JSON.
 | `MARIMOHUB_NOTIFY_WEBHOOK_URL` 🔒 | Required HTTPS endpoint when `webhook` is enabled. It receives the complete notification object. | — | — | `https://events.example.com/marimohub` |
 | `MARIMOHUB_NOTIFY_WEBHOOK_SECRET` 🔒 | Required HMAC-SHA256 key when `webhook` is enabled. It signs the `X-Marimohub-Signature` header. | — | — | — |
 | `MARIMOHUB_NOTIFY_WEBHOOK_KINDS` | Exact comma-separated allowlist for webhooks. If unset or blank, it inherits `MARIMOHUB_NOTIFY_KINDS`. Set `none` to disable webhook delivery. | — | — | `session.takeover` |
+
+## Managed public releases
+
+Selected by `MARIMOHUB_PUBLIC_RELEASE_BACKEND` (default `off`); one of `gcp-cloud-run`, `off`.
+
+Optional one-click Publish and Unpublish for app links. A manager or owner signed in to the browser publishes a saved notebook version and explicitly selected files to an isolated anonymous Cloud Run service. Requires `MARIMOHUB_RUN_MAINTENANCE=true` on one replica, which runs the reconciler. While enabled, manual release URLs are rejected. See `fork/public-dashboard/README.md` in the repository.
+
+### Google Cloud Run
+
+`MARIMOHUB_PUBLIC_RELEASE_BACKEND=gcp-cloud-run`
+
+Appends the frozen release as one read-only layer on a digest-pinned base image in Artifact Registry and deploys it privately before granting `allUsers` invoker. The hub never creates projects or changes IAM outside each release service.
+
+| Variable | Description | Required | Default | Example |
+| --- | --- | --- | --- | --- |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_PROJECT_ID` | Project that hosts public dashboard services. | Yes | — | `marimohub-public-apps` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_PROJECT_NUMBER` | Numeric project ID used in deterministic `https://SERVICE-NUMBER.REGION.run.app` release URLs. | Yes | — | `123456789` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_REGION` | Cloud Run and Artifact Registry location. | Yes | — | `us-west1` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_AR_REPO` | Docker repository that receives release images. | Yes | — | `marimo-public-releases` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE` | Digest-pinned `fork/public-dashboard` base image in the same registry location. Its `io.marimohub.installed-packages` label lists the packages notebooks may import. | Yes | — | `us-west1-docker.pkg.dev/marimohub-public-apps/marimo-public-releases/base@sha256:…` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_RUNTIME_SA` | Service account the dashboards run as. Grant it no roles. It must differ from the publisher identity. | Yes | — | `mh-public-runtime@marimohub-public-apps.iam.gserviceaccount.com` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY` 🔒 | Publisher service-account key JSON. Unset uses the metadata server identity of the hub. | — | — | — |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE` | Label value that scopes orphan sweeps. Give each hub that shares a project and region its own value. | — | `default` | — |
+| `MARIMOHUB_PUBLIC_RELEASE_MAX_LIVE` | Maximum publishing, active or unpublishing releases across the hub. | — | `5` | — |
+| `MARIMOHUB_PUBLIC_RELEASE_MAX_ASSETS` | Maximum selected workspace files per release. | — | `50` | — |
+| `MARIMOHUB_PUBLIC_RELEASE_MAX_ASSET_BYTES` | Largest selectable workspace file. | — | `26214400` | — |
+| `MARIMOHUB_PUBLIC_RELEASE_MAX_TOTAL_ASSET_BYTES` | Combined size of the selected files in one release. | — | `52428800` | — |
+
+### Disabled
+
+`MARIMOHUB_PUBLIC_RELEASE_BACKEND=off`
+
+_No environment variables to set here._
 
 ## Search
 

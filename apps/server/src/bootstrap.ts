@@ -15,6 +15,7 @@ import { DeferredWorkQueue } from './backgroundWork';
 import {
 	startMigrations,
 	startPreviewPreparation,
+	startPublicReleases,
 	startJobScheduler,
 	startMaintenance,
 	startSearchIndexing,
@@ -33,6 +34,7 @@ import { serveSpaFallback, serveStaticWithCache } from './staticCache';
 import { RequestStorage } from './requestStorage';
 import { SHELL_PREFETCH_CSP } from './shellPrefetch';
 import { attachSandboxProxyUpgrade } from './sandboxProxyWs';
+import { parsePublicAppReleases, redirectPublicAppLinks } from './publicAppLinks';
 
 const CLEANUP_TIMEOUT_MS = 10_000;
 const MAX_HTTP_GRACE_MS = 10_000;
@@ -87,9 +89,11 @@ export async function bootstrap(
 	// remediation block to stderr and exit. (Transient backend problems go through the
 	// non-fatal preflight below instead, so they never crashloop a replica.)
 	let validatedEnv: Record<string, string | undefined>;
+	let publicAppReleases: ReturnType<typeof parsePublicAppReleases>;
 	let deps: ApiDeps;
 	try {
 		validatedEnv = validateServerEnv(env);
+		publicAppReleases = parsePublicAppReleases(validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASES);
 		deps = await createDeps(validatedEnv, metrics, {
 			metadataFactory: nodeMetadataFactory,
 			tracing: otel?.tracing ?? false,
@@ -102,6 +106,7 @@ export async function bootstrap(
 			await deps.storageLifecycle?.close();
 			throw error;
 		}
+		deps.publicAppReleaseHostSuffix ??= validatedEnv.MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX;
 		await prepareDeps?.(deps);
 	} catch (err) {
 		if (isConfigError(err)) {
@@ -198,6 +203,17 @@ export async function bootstrap(
 	// Serve the prebuilt SPA. API routes (registered inside createApi) are terminal,
 	// so they take precedence; everything else falls through to static assets, with
 	// a single-page-app fallback to index.html.
+	if (publicAppReleases.size > 0 || deps.publicAppReleaseHostSuffix) {
+		app.use(
+			'/app/*',
+			redirectPublicAppLinks(
+				publicAppReleases,
+				deps.services.deepLinks,
+				deps.publicAppReleaseHostSuffix,
+				deps.services.publicReleases,
+			),
+		);
+	}
 	const spaFallback = serveSpaFallback(staticRoot, validatedEnv.MARIMOHUB_APP_BASE_URL);
 	app.get('/', spaFallback);
 	app.get('/index.html', spaFallback);
@@ -217,6 +233,8 @@ export async function bootstrap(
 		stops.push(startMaintenance(deps, wideEvents, loops));
 		const stopSearch = startSearchIndexing(deps, loops);
 		if (stopSearch) stops.push(stopSearch);
+		const stopPublicReleases = startPublicReleases(deps, loops);
+		if (stopPublicReleases) stops.push(stopPublicReleases);
 		const stopPreviews = startPreviewPreparation(deps, loops);
 		if (stopPreviews) stops.push(stopPreviews);
 		const stopLifecycle = startSessionLifecycle(deps, loops);

@@ -1751,6 +1751,21 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						default: './public',
 					},
 					{
+						id: 'MARIMOHUB_PUBLIC_APP_RELEASES',
+						name: 'Public app releases',
+						description:
+							'JSON map from an app slug to its registration ID and public release origin.',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_APP_RELEASE_HOST_SUFFIX',
+						name: 'Public release host suffix',
+						description:
+							'Cloud Run suffix for release URLs connected through the app link dialog. Release service names start with `marimo-public-`.',
+						example: '-123456789.us-west1.run.app',
+						optIn: true,
+					},
+					{
 						id: 'MARIMOHUB_RUN_MAINTENANCE',
 						name: 'Run maintenance',
 						description:
@@ -2710,6 +2725,114 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 					},
 				],
 			},
+		],
+	},
+	{
+		name: 'Managed public releases',
+		selector: 'MARIMOHUB_PUBLIC_RELEASE_BACKEND',
+		selectorDefault: 'off',
+		description:
+			'Optional one-click Publish and Unpublish for app links. A manager or owner signed in to the browser publishes a saved notebook version and explicitly selected files to an isolated anonymous Cloud Run service. Requires `MARIMOHUB_RUN_MAINTENANCE=true` on one replica, which runs the reconciler. While enabled, manual release URLs are rejected. See `fork/public-dashboard/README.md` in the repository.',
+		backends: [
+			{
+				name: 'Google Cloud Run',
+				selectorValue: 'gcp-cloud-run',
+				description:
+					'Appends the frozen release as one read-only layer on a digest-pinned base image in Artifact Registry and deploys it privately before granting `allUsers` invoker. The hub never creates projects or changes IAM outside each release service.',
+				vars: [
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_PROJECT_ID',
+						name: 'Project ID',
+						description: 'Project that hosts public dashboard services.',
+						example: 'marimohub-public-apps',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_PROJECT_NUMBER',
+						name: 'Project number',
+						description:
+							'Numeric project ID used in deterministic `https://SERVICE-NUMBER.REGION.run.app` release URLs.',
+						example: '123456789',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_REGION',
+						name: 'Region',
+						description: 'Cloud Run and Artifact Registry location.',
+						example: 'us-west1',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_AR_REPO',
+						name: 'Artifact Registry repository',
+						description: 'Docker repository that receives release images.',
+						example: 'marimo-public-releases',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE',
+						name: 'Base image',
+						description:
+							'Digest-pinned `fork/public-dashboard` base image in the same registry location. Its `io.marimohub.installed-packages` label lists the packages notebooks may import.',
+						example:
+							'us-west1-docker.pkg.dev/marimohub-public-apps/marimo-public-releases/base@sha256:…',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_RUNTIME_SA',
+						name: 'Runtime service account',
+						description:
+							'Service account the dashboards run as. Grant it no roles. It must differ from the publisher identity.',
+						example: 'mh-public-runtime@marimohub-public-apps.iam.gserviceaccount.com',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY',
+						name: 'Publisher key',
+						description:
+							'Publisher service-account key JSON. Unset uses the metadata server identity of the hub.',
+						secret: true,
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE',
+						name: 'Hub instance label',
+						description:
+							'Label value that scopes orphan sweeps. Give each hub that shares a project and region its own value.',
+						default: 'default',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_MAX_LIVE',
+						name: 'Live release limit',
+						description: 'Maximum publishing, active or unpublishing releases across the hub.',
+						default: '5',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_MAX_ASSETS',
+						name: 'File limit',
+						description: 'Maximum selected workspace files per release.',
+						default: '50',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_MAX_ASSET_BYTES',
+						name: 'Per-file byte limit',
+						description: 'Largest selectable workspace file.',
+						default: '26214400',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_PUBLIC_RELEASE_MAX_TOTAL_ASSET_BYTES',
+						name: 'Total byte limit',
+						description: 'Combined size of the selected files in one release.',
+						default: '52428800',
+						optIn: true,
+					},
+				],
+			},
+			{ name: 'Disabled', selectorValue: 'off', vars: [] },
 		],
 	},
 	{
