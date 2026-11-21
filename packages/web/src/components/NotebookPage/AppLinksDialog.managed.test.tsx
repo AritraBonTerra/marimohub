@@ -332,6 +332,21 @@ describe('AppLinksDialog managed publishing', () => {
 		expect(await screen.findByText('Stopping public dashboard…')).toBeVisible();
 	});
 
+	it('keeps polling until the first verified release becomes the active head', async () => {
+		const entry: Entry = {
+			active_release_id: null,
+			pending_release_id: release.release_id,
+			releases: [{ ...release, state: 'active' }],
+		};
+		setup('managed', { entry });
+		await screen.findByText('Verifying…', { selector: 'span' });
+		entry.active_release_id = release.release_id;
+		entry.pending_release_id = null;
+		expect(
+			await screen.findByText('Public', { selector: 'span' }, { timeout: 4_000 }),
+		).toBeVisible();
+	});
+
 	it('lets a hub admin without a publish grant stop a live release', async () => {
 		const user = setupUser();
 		const live = { ...release, state: 'active' };

@@ -24,7 +24,10 @@ export function usePublicReleasesQuery(pid: string, nid: string, enabled = true)
 		enabled,
 		staleTime: 0,
 		refetchInterval: (query) =>
-			query.state.data?.some((link) => link.releases.some((r) => IN_FLIGHT.has(r.state)))
+			query.state.data?.some(
+				(link) =>
+					link.pending_release_id !== null || link.releases.some((r) => IN_FLIGHT.has(r.state)),
+			)
 				? 2_500
 				: false,
 	});
