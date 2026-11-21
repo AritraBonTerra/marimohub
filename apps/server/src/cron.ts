@@ -460,7 +460,7 @@ export function startSearchIndexing(
 	}).stop;
 }
 
-/** Leased reconciler for managed public releases; idle ticks only list live markers. */
+/** Leased reconciler for managed public releases. Idle ticks only read the live index. */
 export function startPublicReleases(
 	deps: ApiDeps,
 	loops = new BackgroundLoops(),

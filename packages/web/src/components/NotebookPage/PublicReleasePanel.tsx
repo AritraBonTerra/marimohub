@@ -86,13 +86,17 @@ export function PublicReleasePanel({
 	const canPublish =
 		versionId !== null && assets.isSuccess && acknowledged && !overLimit && !pending && !stopping;
 
-	const stop = (release: PublicRelease) =>
+	const stop = (release: PublicRelease) => {
+		const dashboard = release.state === 'active' || release.activated_at !== undefined;
 		unpublish.mutate(release.release_id, {
 			onSuccess: ({ confirmed }) => {
 				setConfirmingStop(false);
-				toast.success(confirmed ? 'Public dashboard stopped' : 'Stopping public dashboard…');
+				if (dashboard)
+					toast.success(confirmed ? 'Public dashboard stopped' : 'Stopping public dashboard…');
+				else toast.success(confirmed ? 'Publish cancelled' : 'Cancelling publish…');
 			},
 		});
+	};
 
 	return (
 		<div className="flex flex-col gap-3 rounded-md border p-3">
@@ -234,7 +238,7 @@ export function PublicReleasePanel({
 					)}
 				</>
 			)}
-			{confirmingStop && active && (
+			{confirmingStop && active && !pending && !stopping && (
 				<Callout variant="warning">
 					Stop public access to {appPath} and shut down its public dashboard? Active anonymous
 					viewers will be disconnected.
@@ -282,7 +286,7 @@ export function PublicReleasePanel({
 						{publish.isPending ? 'Publishing…' : active ? 'Republish' : 'Publish'}
 					</Button>
 				)}
-				{active && !stopping && !confirmingStop && (
+				{active && !pending && !stopping && !confirmingStop && (
 					<Button variant="danger" isDisabled={busy} onPress={() => setConfirmingStop(true)}>
 						Unpublish…
 					</Button>

@@ -34,6 +34,7 @@ vi.mock('./cron', () => ({
 	startMigrations: vi.fn(() => vi.fn()),
 	startSearchIndexing: vi.fn(),
 	startPreviewPreparation: vi.fn(() => vi.fn()),
+	startPublicReleases: vi.fn(),
 	startMaintenance: vi.fn(() => vi.fn()),
 	startWarmPools: vi.fn(),
 	startSessionLifecycle: vi.fn(() => vi.fn()),

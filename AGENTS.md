@@ -179,8 +179,8 @@ These CAS-managed records also have one writer each:
   release markers and must not be deleted.
 - `PublicReleaseService` owns each managed public release at `_system/public-releases/{release-id}.json`,
   its frozen bundle under `_system/public-releases/{release-id}/bundle/`, each registration head at
-  `_system/public-release-heads/{registration-id}.json`, and each removable live marker at
-  `_system/public-release-live/{release-id}.json`. Releases and heads are CAS records and are retained.
+  `_system/public-release-heads/{registration-id}.json`, and the release reservation index at
+  `_system/public-release-live/index.json`. Release records, heads, and the index use CAS.
   It changes `DeepLink.public_origin` only through `DeepLinkService`, and never for an origin
   without a managed head. A release is marked `unpublished` only after its fence passes and the
   host confirms the service is gone.

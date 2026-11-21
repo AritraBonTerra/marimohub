@@ -1,4 +1,5 @@
 import { gzipSync } from 'fflate';
+import { splitReleaseTarPath } from '@marimo-hub/core';
 import { PublicReleaseHostFatalError } from '@marimo-hub/core/ports/public-release-host';
 import type { PublicReleaseBundleFile } from '@marimo-hub/core/ports/public-release-host';
 
@@ -14,21 +15,13 @@ function octal(value: number, width: number): string {
 	return `${value.toString(8).padStart(width - 1, '0')}\0`;
 }
 
-function splitPath(path: string): { name: string; prefix: string } {
-	if (encoder.encode(path).byteLength <= 100) return { name: path, prefix: '' };
-	for (let i = path.indexOf('/'); i !== -1; i = path.indexOf('/', i + 1)) {
-		const prefix = path.slice(0, i);
-		const name = path.slice(i + 1);
-		if (encoder.encode(prefix).byteLength <= 155 && encoder.encode(name).byteLength <= 100)
-			return { name, prefix };
-	}
-	throw new PublicReleaseHostFatalError('path_too_long', `Release path is too long: ${path}`);
-}
-
 function header(path: string, size: number, directory: boolean): Uint8Array {
 	const block = new Uint8Array(512);
 	const write = (offset: number, value: string) => block.set(encoder.encode(value), offset);
-	const { name, prefix } = splitPath(path);
+	const parts = splitReleaseTarPath(path);
+	if (!parts)
+		throw new PublicReleaseHostFatalError('path_too_long', `Release path is too long: ${path}`);
+	const { name, prefix } = parts;
 	write(0, name);
 	write(100, octal(directory ? 0o555 : 0o444, 8));
 	write(108, octal(RUNTIME_UID, 8));

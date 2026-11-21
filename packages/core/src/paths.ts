@@ -313,9 +313,8 @@ export const paths = {
 		`_system/public-releases/${releaseId}/bundle/${rel}`,
 	publicReleaseHead: (registrationId: string) =>
 		`_system/public-release-heads/${registrationId}.json`,
-	/** One marker per non-terminal release, so the reconciler lists only live work. */
-	publicReleaseLivePrefix: '_system/public-release-live/',
-	publicReleaseLive: (releaseId: string) => `_system/public-release-live/${releaseId}.json`,
+	/** CAS-managed reservations for releases that still need reconciliation. */
+	publicReleaseLiveIndex: '_system/public-release-live/index.json',
 	publicReleasesLock: '_system/_public_releases.lock',
 	catalog: '_system/catalog.json',
 	snapshot: (id: SnapshotId) => `_system/snapshots/${id}.json`,

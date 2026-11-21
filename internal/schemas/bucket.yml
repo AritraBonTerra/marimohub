@@ -696,19 +696,15 @@ paths:
       responses:
         '204':
           description: Stored.
-  /_system/public-release-live/{release_id}.json:
-    summary: Present while a release is not terminal; the reconciler lists only these.
-    parameters:
-      - name: release_id
-        in: path
-        required: true
-        schema:
-          type: string
-    x-mutability: last-writer-wins
+  /_system/public-release-live/index.json:
+    summary: Capacity reservations for non-terminal releases and their
+      reconciliation index.
+    parameters: []
+    x-mutability: cas
     x-owner: PublicReleaseService
     get:
-      operationId: read_system_public_release_live_json
-      summary: Read PublicReleaseLiveMarker
+      operationId: read_system_public_release_live_index_json
+      summary: Read PublicReleaseLiveIndex
       tags:
         - deep-links
       responses:
@@ -717,10 +713,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PublicReleaseLiveMarker'
+                $ref: '#/components/schemas/PublicReleaseLiveIndex'
     put:
-      operationId: write_system_public_release_live_json
-      summary: Write PublicReleaseLiveMarker
+      operationId: write_system_public_release_live_index_json
+      summary: Write PublicReleaseLiveIndex
       tags:
         - deep-links
       requestBody:
@@ -728,7 +724,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PublicReleaseLiveMarker'
+              $ref: '#/components/schemas/PublicReleaseLiveIndex'
       responses:
         '204':
           description: Stored.
@@ -5191,6 +5187,10 @@ components:
               format: ulid
               pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
             - type: 'null'
+        withdrawing_release_id:
+          type: string
+          format: ulid
+          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
         last_release_id:
           anyOf:
             - type: string
@@ -5211,37 +5211,21 @@ components:
         - last_release_id
         - updated_at
       additionalProperties: {}
-    PublicReleaseLiveMarker:
+    PublicReleaseLiveIndex:
       type: object
       properties:
-        release_id:
-          type: string
-          format: ulid
-          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
-        registration_id:
-          type: string
-          format: ulid
-          pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
-        target:
-          type: object
-          properties:
-            kind:
-              type: string
-              const: app
-            project_id:
-              type: string
-            notebook_id:
-              type: string
-          required:
-            - kind
-            - project_id
-            - notebook_id
-          additionalProperties: false
+        schema_version:
+          type: number
+          const: 1
+        release_ids:
+          type: array
+          items:
+            type: string
+            format: ulid
+            pattern: ^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$
       required:
-        - release_id
-        - registration_id
-        - target
-      additionalProperties: {}
+        - schema_version
+        - release_ids
     Catalog:
       type: object
       properties:

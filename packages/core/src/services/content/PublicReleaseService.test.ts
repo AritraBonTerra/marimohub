@@ -116,6 +116,7 @@ describe('asset path rules', () => {
 		'notebook.py',
 		'pyproject.toml',
 		'release.json',
+		`data/${'a'.repeat(101)}.csv`,
 	])('rejects %s', (path) => {
 		expect(() => normalizeApprovedAssetPath(path, 'notebook.py')).toThrow(ValidationError);
 	});
@@ -229,8 +230,28 @@ describe('PublicReleaseService', () => {
 
 	it('enforces the live release cap', async () => {
 		const capped = makeService({ limits: { maxLiveReleases: 1 } });
-		await publish([], 'one', capped);
-		await expect(publish([], 'two', capped)).rejects.toBeInstanceOf(ConflictError);
+		const results = await Promise.allSettled([
+			publish([], 'one', capped),
+			publish([], 'two', capped),
+		]);
+		expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+		expect(results.find((result) => result.status === 'rejected')?.reason).toBeInstanceOf(
+			ConflictError,
+		);
+	});
+
+	it('requires a pending replacement to be cancelled before withdrawing the active app', async () => {
+		const initial = await publish();
+		await settle(initial.release_id);
+		const replacement = await publish();
+		await expect(releases.requestUnpublish(initial.release_id, 'user')).rejects.toThrow(
+			'Cancel the replacement',
+		);
+		await releases.requestUnpublish(replacement.release_id, 'user');
+		await settle(replacement.release_id);
+		await releases.requestUnpublish(initial.release_id, 'user');
+		expect((await services.deepLinks.resolve(initial.slug)).public_origin).toBeNull();
+		await expect(publish()).rejects.toThrow('Unpublishing is already in progress');
 	});
 
 	it('names runtime packages the notebook needs but the base image lacks', async () => {
@@ -367,7 +388,8 @@ describe('PublicReleaseService', () => {
 			state: 'failed',
 		});
 		expect(host.services.has(republish.service_name)).toBe(false);
-		expect(await bucket.get(paths.publicReleaseLive(republish.release_id))).toBeNull();
+		const index = await bucket.get(paths.publicReleaseLiveIndex);
+		expect(await index?.text()).not.toContain(republish.release_id);
 		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(release.origin);
 	});
 

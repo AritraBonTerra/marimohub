@@ -8,6 +8,28 @@ export const PUBLIC_RELEASE_SERVICE_PREFIX = 'marimo-public-';
 const SHA256 = /^[0-9a-f]{64}$/;
 const PUBLIC_PHOTO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif']);
 const MAX_ASSET_PATH_BYTES = 200;
+const pathEncoder = new TextEncoder();
+
+/** Split an archive path into the byte-limited name and prefix fields of a ustar header. */
+export function splitReleaseTarPath(path: string): { name: string; prefix: string } | null {
+	if (pathEncoder.encode(path).byteLength <= 100) return { name: path, prefix: '' };
+	for (let i = path.indexOf('/'); i !== -1 && i < path.length - 1; i = path.indexOf('/', i + 1)) {
+		const prefix = path.slice(0, i);
+		const name = path.slice(i + 1);
+		if (pathEncoder.encode(prefix).byteLength <= 155 && pathEncoder.encode(name).byteLength <= 100)
+			return { name, prefix };
+	}
+	return null;
+}
+
+/** The full path and each directory need their own archive headers under release/. */
+export function isArchiveableReleasePath(path: string): boolean {
+	const archivePath = `release/${path}`;
+	for (let i = archivePath.indexOf('/'); i !== -1; i = archivePath.indexOf('/', i + 1)) {
+		if (!splitReleaseTarPath(archivePath.slice(0, i + 1))) return false;
+	}
+	return splitReleaseTarPath(archivePath) !== null;
+}
 
 export const PublicReleaseStateSchema = z.enum([
 	'publishing',
@@ -87,15 +109,15 @@ export const PublicReleaseHeadSchema = z.looseObject({
 	active_release_id: ulidString().nullable(),
 	/** At most one publish in flight per registration; claimed by CAS. */
 	pending_release_id: ulidString().nullable(),
+	withdrawing_release_id: ulidString().optional(),
 	last_release_id: ulidString().nullable(),
 	updated_at: utcTimestamp(),
 });
 export type PublicReleaseHead = z.infer<typeof PublicReleaseHeadSchema>;
 
-export const PublicReleaseLiveMarkerSchema = z.looseObject({
-	release_id: ulidString(),
-	registration_id: ulidString(),
-	target: DeepLinkTargetSchema,
+export const PublicReleaseLiveIndexSchema = z.object({
+	schema_version: z.literal(1),
+	release_ids: z.array(ulidString()),
 });
 
 /** The `/release/release.json` manifest the runtime verifies at startup. */
@@ -122,7 +144,8 @@ export const DEFAULT_PUBLIC_RELEASE_LIMITS: PublicReleaseLimits = {
 
 function assetPathProblem(path: string, entrypoint: string): string | null {
 	if (!path) return 'is empty';
-	if (new TextEncoder().encode(path).byteLength > MAX_ASSET_PATH_BYTES) return 'is too long';
+	if (pathEncoder.encode(path).byteLength > MAX_ASSET_PATH_BYTES || !isArchiveableReleasePath(path))
+		return 'is too long';
 	if (path.startsWith('/') || path.endsWith('/')) return 'must be relative';
 	// eslint-disable-next-line no-control-regex
 	if (path.includes('\\') || /[\u0000-\u001f\u007f]/.test(path)) return 'has invalid characters';

@@ -42,7 +42,7 @@ import { ThumbnailRecordSchema } from '../services/content/ThumbnailService';
 import { DeepLinkRecordSchema } from '../deepLinks';
 import {
 	PublicReleaseHeadSchema,
-	PublicReleaseLiveMarkerSchema,
+	PublicReleaseLiveIndexSchema,
 	PublicReleaseRecordSchema,
 } from '../publicReleases';
 import type { z } from 'zod';
@@ -308,11 +308,11 @@ export const STORED_OBJECTS: BucketObject[] = [
 		tag: 'deep-links',
 	},
 	{
-		name: 'PublicReleaseLiveMarker',
-		key: paths.publicReleaseLive('{release_id}'),
-		schema: PublicReleaseLiveMarkerSchema,
-		summary: 'Present while a release is not terminal; the reconciler lists only these.',
-		mutability: 'last-writer-wins',
+		name: 'PublicReleaseLiveIndex',
+		key: paths.publicReleaseLiveIndex,
+		schema: PublicReleaseLiveIndexSchema,
+		summary: 'Capacity reservations for non-terminal releases and their reconciliation index.',
+		mutability: 'cas',
 		owner: 'PublicReleaseService',
 		tag: 'deep-links',
 	},

@@ -30,12 +30,13 @@ import {
 	DEFAULT_PUBLIC_RELEASE_LIMITS,
 	deriveAssetExposure,
 	deriveDeterministicOrigin,
+	isArchiveableReleasePath,
 	isEligibleAssetPath,
 	normalizeApprovedAssetPath,
 	normalizePackageName,
 	PUBLIC_RELEASE_SERVICE_PREFIX,
 	PublicReleaseHeadSchema,
-	PublicReleaseLiveMarkerSchema,
+	PublicReleaseLiveIndexSchema,
 	PublicReleaseRecordSchema,
 	publicReleaseServiceName,
 	requirementName,
@@ -61,7 +62,6 @@ const PUBLISH_DEADLINE_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
 const SWEEP_INTERVAL_MS = 60_000;
-const STALE_MARKER_MS = 5 * 60_000;
 const MAX_CANDIDATES = 500;
 const MAX_STEPS_PER_ADVANCE = 4;
 
@@ -160,8 +160,8 @@ function dependencyList(toml: string, pick: (table: Record<string, unknown>) => 
 }
 
 /**
- * Owns `_system/public-releases/`, `_system/public-release-heads/` and
- * `_system/public-release-live/`. Publishing freezes exact bytes, a leased reconciler
+ * Owns the release records, registration heads and live release index.
+ * Publishing freezes exact bytes, and a leased reconciler
  * deploys privately, exposes behind a CAS fence, and swaps the app link only after the
  * anonymous origin answers. Withdrawal clears the link first and is confirmed only once
  * the host reports the service gone and an anonymous probe is refused.
@@ -266,25 +266,41 @@ export class PublicReleaseService {
 		throw new ConflictError('Public release state changed concurrently; try again');
 	}
 
-	private async liveMarkers() {
-		const keys = await listAllKeys(this.bucket, paths.publicReleaseLivePrefix);
-		const markers = await mapWithConcurrency(keys, 8, async (key) => {
-			const object = await this.bucket.get(key);
-			if (!object) return null;
-			return {
-				key,
-				uploaded: object.uploaded.getTime(),
-				marker: await readStored(PublicReleaseLiveMarkerSchema, object, key),
-			};
-		});
-		return markers.filter((marker) => marker !== null);
+	private async readLiveIndex() {
+		const key = paths.publicReleaseLiveIndex;
+		const object = await this.bucket.get(key);
+		if (!object) return { ids: [], etag: undefined };
+		const index = await readStored(PublicReleaseLiveIndexSchema, object, key);
+		return { ids: index.release_ids, etag: object.etag };
+	}
+
+	/** The index both reserves concurrency-limited capacity and makes releases discoverable. */
+	private async updateLiveIndex(releaseId: string, add: boolean): Promise<void> {
+		for (let attempt = 0; attempt < 8; attempt++) {
+			const { ids, etag } = await this.readLiveIndex();
+			if (ids.includes(releaseId) === add) return;
+			if (add && ids.length >= this.limits.maxLiveReleases)
+				throw new ConflictError('The public release limit for this hub has been reached');
+			try {
+				await this.bucket.put(
+					paths.publicReleaseLiveIndex,
+					JSON.stringify({
+						schema_version: 1,
+						release_ids: add ? [...ids, releaseId] : ids.filter((id) => id !== releaseId),
+					}),
+					etag ? { onlyIfEtagMatches: etag } : { onlyIfNotExists: true },
+				);
+				return;
+			} catch (error) {
+				if (!(error instanceof PreconditionFailedError)) throw error;
+			}
+		}
+		throw new ConflictError('Public release capacity changed concurrently; try again');
 	}
 
 	private async liveReleases(): Promise<PublicReleaseRecord[]> {
-		const markers = await this.liveMarkers();
-		const records = await mapWithConcurrency(markers, 8, (m) =>
-			this.getRelease(m.marker.release_id),
-		);
+		const { ids } = await this.readLiveIndex();
+		const records = await mapWithConcurrency(ids, 8, (id) => this.getRelease(id));
 		return records.filter(
 			(record): record is PublicReleaseRecord => record !== null && !isTerminal(record),
 		);
@@ -415,6 +431,8 @@ export class PublicReleaseService {
 		const version = nb.version(versionId);
 		const synced = remoteWorkspaceEntry(notebook.source);
 		const entrypoint = synced ?? workspaceSourcePolicy(notebook.source).entryNotebook;
+		if (!isArchiveableReleasePath(entrypoint))
+			throw new ValidationError('The notebook path is too long for public publishing');
 		return {
 			versionId,
 			entrypoint,
@@ -528,7 +546,7 @@ export class PublicReleaseService {
 		}
 		if (total > this.limits.maxTotalAssetBytes)
 			throw new ValidationError('Selected files exceed the total size limit');
-		if ((await this.liveReleases()).length >= this.limits.maxLiveReleases)
+		if ((await this.readLiveIndex()).ids.length >= this.limits.maxLiveReleases)
 			throw new ConflictError('The public release limit for this hub has been reached');
 
 		const codeObject = await this.bucket.get(layout.codeKey);
@@ -604,7 +622,10 @@ export class PublicReleaseService {
 
 		const staleCandidates: string[] = [];
 		let claimed = false;
+		let reserved = false;
 		try {
+			await this.updateLiveIndex(releaseId, true);
+			reserved = true;
 			const pending = (await this.readHead(link.registration_id))?.head.pending_release_id;
 			if (pending && (await this.isStalePending(pending))) staleCandidates.push(pending);
 			await this.updateHead(
@@ -620,29 +641,30 @@ export class PublicReleaseService {
 					updated_at: iso,
 				}),
 				(head) => {
+					if (head.withdrawing_release_id)
+						throw new ConflictError('Unpublishing is already in progress for this link');
 					if (head.pending_release_id && !staleCandidates.includes(head.pending_release_id))
 						throw new ConflictError('A publish or unpublish is already in progress for this link');
 					return { ...head, slug: link.slug, target, pending_release_id: releaseId };
 				},
 			);
 			claimed = true;
-			await this.bucket.put(
-				paths.publicReleaseLive(releaseId),
-				JSON.stringify({ release_id: releaseId, registration_id: link.registration_id, target }),
-			);
 		} finally {
-			if (!claimed) await this.abandon(releaseId);
+			if (!claimed) {
+				if (reserved) await this.requestUnpublish(releaseId, 'publish_failed');
+				else await this.abandon(releaseId);
+			}
 		}
 		for (const stale of staleCandidates) await this.abandon(stale);
 		await this.event('publish_requested', record, input.actor, { version_id: input.versionId });
 		return record;
 	}
 
-	/** A pending release with no live marker never reached the reconciler, so no cloud state exists. */
+	/** Legacy pending records without a reservation never reached the reconciler. */
 	private async isStalePending(releaseId: string): Promise<boolean> {
 		const current = await this.read(releaseId);
 		if (!current || isTerminal(current.record)) return true;
-		if (await this.bucket.head(paths.publicReleaseLive(releaseId))) return false;
+		if ((await this.readLiveIndex()).ids.includes(releaseId)) return false;
 		return this.now() - Date.parse(current.record.created_at) > 60_000;
 	}
 
@@ -677,6 +699,20 @@ export class PublicReleaseService {
 			if (isTerminal(record) || record.state === 'unpublishing') {
 				await this.clearLink(record);
 				return record;
+			}
+			if (reason === 'user' && record.state === 'active') {
+				await this.updateHead(
+					record.registration_id,
+					() => this.emptyHead(record),
+					(head) => {
+						if (head.pending_release_id && head.pending_release_id !== releaseId)
+							throw new ConflictError('Cancel the replacement before unpublishing this dashboard');
+						if (head.withdrawing_release_id === releaseId) return null;
+						if (head.active_release_id !== releaseId && head.pending_release_id !== releaseId)
+							throw new ConflictError('The dashboard has changed; refresh before unpublishing');
+						return { ...head, withdrawing_release_id: releaseId };
+					},
+				);
 			}
 			const now = this.now();
 			// A lease means a worker may still have a cloud call in flight, even past expiry.
@@ -727,20 +763,14 @@ export class PublicReleaseService {
 
 	async shouldRun(): Promise<boolean> {
 		if (this.now() - this.lastSweepAt >= SWEEP_INTERVAL_MS) return true;
-		const page = await this.bucket.list({ prefix: paths.publicReleaseLivePrefix, limit: 1 });
-		return page.objects.length > 0;
+		return (await this.readLiveIndex()).ids.length > 0;
 	}
 
 	/** One reconciler pass: advance live releases, then periodically sweep host-side orphans. */
 	async reconcileTick(holder: string, signal?: AbortSignal): Promise<void> {
-		for (const { key, uploaded, marker } of await this.liveMarkers()) {
+		for (const id of (await this.readLiveIndex()).ids) {
 			signal?.throwIfAborted();
-			const record = await this.getRelease(marker.release_id);
-			if (!record) {
-				if (this.now() - uploaded > STALE_MARKER_MS) await this.bucket.delete(key);
-				continue;
-			}
-			await this.advance(marker.release_id, holder, signal);
+			if (!(await this.advance(id, holder, signal))) await this.updateLiveIndex(id, false);
 		}
 		if (this.now() - this.lastSweepAt >= SWEEP_INTERVAL_MS) {
 			await this.sweepHost(signal);
@@ -949,6 +979,8 @@ export class PublicReleaseService {
 		const guard = await this.guardPublishing(current);
 		if (guard !== 'ok') return guard;
 		const { record } = current;
+		const head = await this.readHead(record.registration_id);
+		if (head?.head.pending_release_id !== record.release_id) return null;
 		const result = await this.host.deployPrivate({
 			releaseId: record.release_id,
 			serviceName: record.service_name,
@@ -1028,12 +1060,15 @@ export class PublicReleaseService {
 		const { record } = current;
 		let previous: string | null = null;
 		let superseded = false;
+		let withdrawing = false;
 		await this.updateHead(
 			record.registration_id,
 			() => this.emptyHead(record),
 			(head) => {
 				previous = null;
 				superseded = false;
+				withdrawing = head.withdrawing_release_id === record.release_id;
+				if (withdrawing) return null;
 				if (head.pending_release_id === record.release_id) {
 					previous = head.active_release_id === record.release_id ? null : head.active_release_id;
 					return {
@@ -1048,6 +1083,10 @@ export class PublicReleaseService {
 				return null;
 			},
 		);
+		if (withdrawing) {
+			await this.requestUnpublish(record.release_id, 'user');
+			return null;
+		}
 		if (superseded) {
 			await this.requestUnpublish(record.release_id, 'republish_superseded');
 			return null;
@@ -1129,6 +1168,7 @@ export class PublicReleaseService {
 			(head) =>
 				head.active_release_id !== record.release_id &&
 				head.pending_release_id !== record.release_id &&
+				head.withdrawing_release_id !== record.release_id &&
 				head.last_release_id === record.release_id
 					? null
 					: {
@@ -1137,10 +1177,14 @@ export class PublicReleaseService {
 								head.active_release_id === record.release_id ? null : head.active_release_id,
 							pending_release_id:
 								head.pending_release_id === record.release_id ? null : head.pending_release_id,
+							withdrawing_release_id:
+								head.withdrawing_release_id === record.release_id
+									? undefined
+									: head.withdrawing_release_id,
 							last_release_id: record.release_id,
 						},
 		);
 		await this.deleteBundle(record.release_id);
-		await this.bucket.delete(paths.publicReleaseLive(record.release_id));
+		await this.updateLiveIndex(record.release_id, false);
 	}
 }
