@@ -9,7 +9,7 @@ import { Hono } from 'hono';
 import type { ApiDeps } from '@marimo-hub/api';
 import { createApi, SANDBOX_PROXY_PREFIXES } from '@marimo-hub/api';
 import { createFromEnvAsync, isConfigError } from '@marimo-hub/config';
-import { disposeNotifier } from '@marimo-hub/core';
+import { assertPublicReleaseTarget, disposeNotifier } from '@marimo-hub/core';
 import { configureLogLevel } from '@marimo-hub/core/logs';
 import { DeferredWorkQueue } from './backgroundWork';
 import {
@@ -211,6 +211,7 @@ export async function bootstrap(
 				deps.services.deepLinks,
 				deps.publicAppReleaseHostSuffix,
 				deps.services.publicReleases,
+				(target) => assertPublicReleaseTarget(deps.services, target),
 			),
 		);
 	}

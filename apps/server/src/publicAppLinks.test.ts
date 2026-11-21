@@ -1,5 +1,11 @@
 import { Hono } from 'hono';
-import { createServices, NotFoundError } from '@marimo-hub/core';
+import {
+	createServices,
+	ForbiddenError,
+	NotebookId,
+	NotFoundError,
+	ProjectId,
+} from '@marimo-hub/core';
 import { ACTOR } from '@marimo-hub/core/testing';
 import { MemoryBucket } from '@marimo-hub/core/testing/memory-bucket';
 import { FakePublicReleaseHost } from '@marimo-hub/core/testing/public-release-host';
@@ -11,6 +17,11 @@ const releaseOrigin = 'https://dashboard.example.com';
 const link = {
 	slug: 'sales/week',
 	registration_id: registrationId,
+	target: {
+		kind: 'app' as const,
+		project_id: ProjectId.create(),
+		notebook_id: NotebookId.create(),
+	},
 };
 
 function makeApp(registration = link) {
@@ -52,6 +63,17 @@ describe('public app links', () => {
 		expect(await (await app.request('/app/sales/week')).text()).toBe('hub');
 	});
 
+	it('bounds anonymous storage lookups', async () => {
+		const { app, resolve } = makeApp();
+		for (let i = 0; i < 300; i++) {
+			expect((await app.request('/app/sales/week', { method: 'HEAD' })).status).toBe(302);
+		}
+		const response = await app.request('/app/sales/week');
+		expect(response.status).toBe(429);
+		expect(response.headers.get('retry-after')).toBe('10');
+		expect(resolve).toHaveBeenCalledTimes(300);
+	});
+
 	it.each(['http://example.com', 'https://example.com/path', 'https://user@example.com'])(
 		'rejects invalid release origin %s',
 		(origin) => {
@@ -78,6 +100,27 @@ it('redirects a published origin on the approved host and stops after unpublishi
 		public_origin: 'https://marimo-public-sales-456.us-west1.run.app',
 	});
 	expect(await (await app.request('/app/sales/week')).text()).toBe('sign in');
+});
+
+it('checks classification before serving a configured legacy redirect', async () => {
+	const app = new Hono();
+	const releases = parsePublicAppReleases(
+		JSON.stringify({ [link.slug]: { registration_id: registrationId, origin: releaseOrigin } }),
+	);
+	const assertPublic = vi.fn().mockRejectedValue(new ForbiddenError('Security labels'));
+	app.use(
+		'/app/*',
+		redirectPublicAppLinks(
+			releases,
+			{ resolve: async () => link },
+			undefined,
+			undefined,
+			assertPublic,
+		),
+	);
+	app.get('*', (c) => c.text('sign in'));
+	expect(await (await app.request('/app/sales/week')).text()).toBe('sign in');
+	expect(assertPublic).toHaveBeenCalledWith(link.target);
 });
 
 it('redirects a managed release until it is unpublished', async () => {
@@ -119,6 +162,14 @@ it('redirects a managed release until it is unpublished', async () => {
 		expect(response.headers.get('location')).toBe(release.origin);
 		expect(response.headers.get('cache-control')).toBe('no-store');
 	}
+	await services.notebooks.setSecurityLabels(
+		project.id,
+		notebook.id,
+		{ classification: 'secret', compartments: [] },
+		ACTOR,
+	);
+	expect(await (await app.request('/app/sales')).text()).toBe('sign in');
+	await services.notebooks.setSecurityLabels(project.id, notebook.id, undefined, ACTOR);
 	await services.publicReleases!.requestUnpublish(release.release_id, 'user', ACTOR);
 	expect(await (await app.request('/app/sales')).text()).toBe('sign in');
 	// A worker that started before Unpublish can finish writing the origin afterward.

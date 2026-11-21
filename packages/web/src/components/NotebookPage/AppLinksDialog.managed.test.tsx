@@ -25,9 +25,23 @@ const ok = (data: unknown, status = 200) =>
 		headers: { 'content-type': 'application/json' },
 	});
 
+type Entry = {
+	active_release_id: string | null;
+	pending_release_id: string | null;
+	releases: (typeof release & { state: string })[];
+};
+
 function setup(
 	mode: 'managed' | 'manual' | 'disabled',
-	options: { labeled?: boolean; canPublish?: boolean } = {},
+	options: {
+		labeled?: boolean;
+		canPublish?: boolean;
+		canEmergencyUnpublish?: boolean;
+		truncated?: boolean;
+		/** Fixed release list, instead of one release following `state`. */
+		entry?: Entry;
+		publicOrigin?: string;
+	} = {},
 ) {
 	let state: string | null = null;
 	let chartHash = 'b'.repeat(64);
@@ -40,6 +54,7 @@ function setup(
 		const path = url.pathname;
 		if (init?.method === 'POST') {
 			posts.push({ path, body: init.body ? JSON.parse(String(init.body)) : null });
+			if (path.endsWith('/deep-links')) return ok({ ...link, public_origin: null });
 			if (path.endsWith('/unpublish')) {
 				state = 'unpublishing';
 				return ok({ ...release, state }, 202);
@@ -111,18 +126,23 @@ function setup(
 						selectable: true,
 					},
 				],
+				...(options.truncated ? { truncated: true } : {}),
 			});
 		}
+		if (path.endsWith('/public-releases') && options.entry)
+			return ok([{ ...link, ...options.entry }]);
 		if (path.endsWith('/public-releases'))
 			return ok([
 				{
 					...link,
-					active_release_id: state === 'active' ? release.release_id : null,
+					// The head keeps naming the live release while it is withdrawn.
+					active_release_id:
+						state === 'active' || state === 'unpublishing' ? release.release_id : null,
 					pending_release_id: state === 'publishing' ? release.release_id : null,
 					releases: state ? [{ ...release, state }] : [],
 				},
 			]);
-		return ok([link]);
+		return ok([{ ...link, public_origin: options.publicOrigin ?? null }]);
 	});
 	vi.stubGlobal('fetch', fetch);
 	const { client } = renderWithClient(
@@ -131,6 +151,7 @@ function setup(
 			notebookId="nb-1"
 			canManage
 			canPublish={options.canPublish ?? true}
+			canEmergencyUnpublish={options.canEmergencyUnpublish ?? false}
 			onClose={() => {}}
 		/>,
 		{ toaster: true },
@@ -263,5 +284,110 @@ describe('AppLinksDialog managed publishing', () => {
 		expect(
 			screen.getByRole('button', { name: 'Unpublish sales before removing it' }),
 		).toBeDisabled();
+	});
+	it('keeps Unpublish for the live release while an older release retires', async () => {
+		const user = setupUser();
+		const older = { ...release, release_id: '01ARZ3NDEKTSV4RRFFQ69G5FA0', state: 'unpublishing' };
+		const live = { ...release, state: 'active' };
+		setup('managed', {
+			entry: {
+				active_release_id: live.release_id,
+				pending_release_id: null,
+				releases: [live, older],
+			},
+		});
+		await user.click(await screen.findByRole('button', { name: 'Manage publication' }));
+		expect(screen.getByText('Public', { selector: 'span' })).toBeInTheDocument();
+		expect(screen.getByText(/Older release is shutting down automatically/)).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Unpublish…' })).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Retry unpublish' })).not.toBeInTheDocument();
+		expect(
+			screen.getByRole('button', { name: 'Unpublish sales before removing it' }),
+		).toBeDisabled();
+	});
+
+	it('shows a head-pending release that reads active as still verifying', async () => {
+		const user = setupUser();
+		const live = { ...release, state: 'active' };
+		const candidate = { ...release, release_id: '01ARZ3NDEKTSV4RRFFQ69G5FB9', state: 'active' };
+		const { posts } = setup('managed', {
+			entry: {
+				active_release_id: live.release_id,
+				pending_release_id: candidate.release_id,
+				releases: [candidate, live],
+			},
+		});
+		await user.click(await screen.findByRole('button', { name: 'Manage publication' }));
+		expect(screen.getByText('Verifying…', { selector: 'span' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Cancel publish' })).toBeInTheDocument();
+		// The live release stays stoppable; the replacement is cancelled first.
+		await user.click(screen.getByRole('button', { name: 'Unpublish…' }));
+		expect(screen.getByText(/The release being published is cancelled first/)).toBeInTheDocument();
+		await user.click(screen.getByRole('button', { name: 'Unpublish' }));
+		await waitFor(() => expect(posts).toHaveLength(2));
+		expect(posts.map((post) => post.path.split('/').at(-2))).toEqual([
+			candidate.release_id,
+			live.release_id,
+		]);
+		expect(await screen.findByText('Stopping public dashboard…')).toBeVisible();
+	});
+
+	it('keeps polling until the first verified release becomes the active head', async () => {
+		const entry: Entry = {
+			active_release_id: null,
+			pending_release_id: release.release_id,
+			releases: [{ ...release, state: 'active' }],
+		};
+		setup('managed', { entry });
+		await screen.findByText('Verifying…', { selector: 'span' });
+		entry.active_release_id = release.release_id;
+		entry.pending_release_id = null;
+		expect(
+			await screen.findByText('Public', { selector: 'span' }, { timeout: 4_000 }),
+		).toBeVisible();
+	});
+
+	it('lets a hub admin without a publish grant stop a live release', async () => {
+		const user = setupUser();
+		const live = { ...release, state: 'active' };
+		const { posts } = setup('managed', {
+			canPublish: false,
+			canEmergencyUnpublish: true,
+			entry: { active_release_id: live.release_id, pending_release_id: null, releases: [live] },
+		});
+		await user.click(await screen.findByRole('button', { name: 'Emergency unpublish…' }));
+		expect(screen.getByText(/recorded in the audit log/)).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Publish' })).not.toBeInTheDocument();
+		await user.click(screen.getByRole('button', { name: 'Emergency unpublish' }));
+		await waitFor(() => expect(posts).toHaveLength(1));
+		expect(posts[0].path).toBe(
+			`/api/v1/projects/proj-1/notebooks/nb-1/public-releases/${live.release_id}/unpublish`,
+		);
+	});
+
+	it('notes a truncated file preview and where files come from', async () => {
+		const user = setupUser();
+		setup('managed', { truncated: true });
+		await user.click(await screen.findByRole('button', { name: 'Publish' }));
+		expect(await screen.findByText(/Some files are not listed/)).toBeInTheDocument();
+		expect(
+			screen.getByText(/other notebooks list the current workspace files/),
+		).toBeInTheDocument();
+	});
+
+	it('lets the owner disconnect a legacy release URL in managed mode', async () => {
+		const user = setupUser();
+		const { posts } = setup('managed', {
+			publicOrigin: 'https://marimo-public-legacy-123.us-west1.run.app',
+		});
+		await user.click(await screen.findByRole('button', { name: 'Disconnect legacy URL' }));
+		await waitFor(() => expect(posts).toHaveLength(1));
+		expect(posts[0]).toEqual({
+			path: '/api/v1/projects/proj-1/notebooks/nb-1/deep-links',
+			body: {
+				slug: 'sales',
+				publication: { registration_id: link.registration_id, origin: null },
+			},
+		});
 	});
 });

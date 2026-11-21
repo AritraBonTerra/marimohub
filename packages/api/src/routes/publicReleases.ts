@@ -18,6 +18,7 @@ import type { Context } from 'hono';
 import {
 	assertProjectRole,
 	assertSessionAuthenticated,
+	canDeploymentAction,
 	commonErrors,
 	createApp,
 	errorResponses,
@@ -29,6 +30,7 @@ import {
 	SESSION_ONLY_SECURITY,
 } from '../shared';
 import type { HonoEnv } from '../context';
+import { appendAudit } from '../log';
 
 const INLINE_UNPUBLISH_MS = 8_000;
 const SHA256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -122,7 +124,7 @@ const assets = createRoute({
 	tags: ['App links'],
 	summary: 'List workspace files that can be approved for a public release',
 	description:
-		'Hidden files, generated caches, the notebook entrypoint and `pyproject.toml` are never listed. Only photos under `public/` are web-served; other files are readable from Python only.',
+		'Hidden files, generated caches, the notebook entrypoint and `pyproject.toml` are never listed. Only photos under `public/` are web-served; other files are readable from Python only. Git-synced notebooks list the files saved with `version_id`; other notebooks list the current workspace files, and publishing freezes the bytes that match the approved hashes. `truncated` is true when only a bounded preview of the workspace is listed.',
 	security: SESSION_ONLY_SECURITY,
 	request: { params: NotebookIdParam, query: z.object({ version_id: VersionIdSchema }) },
 	responses: {
@@ -142,6 +144,7 @@ const assets = createRoute({
 							reason: z.literal('exceeds_max_file_bytes').optional(),
 						}),
 					),
+					truncated: z.boolean().optional(),
 				}),
 			}),
 			'Candidate files with their current hashes',
@@ -188,7 +191,7 @@ const unpublish = createRoute({
 	tags: ['App links'],
 	summary: 'Stop a public dashboard',
 	description:
-		'Clears the app link redirect immediately. Returns 200 once the host confirms the direct release URL refuses anonymous visitors, or 202 while revocation continues in the background.',
+		'Clears the app link redirect immediately. Returns 200 once the host confirms the direct release URL refuses anonymous visitors, or 202 while revocation continues in the background. The project owner can stop the current or pending release of the link; a hub super admin can do the same as an audited emergency action without being able to publish.',
 	security: SESSION_ONLY_SECURITY,
 	request: { params: NotebookIdParam.extend({ release_id: ulidString() }) },
 	responses: {
@@ -223,6 +226,27 @@ async function authorizeManage(
 	if (project.owner !== user.id)
 		throw new ForbiddenError('Only the project owner can manage public dashboard releases');
 	await loadAuthorizedNotebookMeta(deps, project, nid, user, 'deep-link.manage');
+}
+
+/**
+ * Owners withdraw through the normal path. A hub super admin who cannot manage the
+ * notebook gets an audited emergency withdrawal instead; everyone else sees the owner error.
+ */
+async function authorizeWithdraw(
+	c: Context<HonoEnv>,
+	pid: ProjectId,
+	nid: NotebookId,
+): Promise<'owner' | 'emergency'> {
+	// Outside the fallback: a token must never reach the emergency path.
+	assertSessionAuthenticated(c, 'unpublish a public app link');
+	try {
+		await authorizeManage(c, pid, nid, 'unpublish a public app link');
+		return 'owner';
+	} catch (error) {
+		if (!(error instanceof ForbiddenError || error instanceof NotFoundError)) throw error;
+		if (!(await canDeploymentAction(c.get('user'), 'admin.access', c.get('deps')))) throw error;
+		return 'emergency';
+	}
 }
 
 const app = createApp();
@@ -271,11 +295,30 @@ app.openapi(publish, async (c) => {
 app.openapi(unpublish, async (c) => {
 	const { pid, nid, release_id } = c.req.valid('param');
 	const service = managed(c);
-	await authorizeManage(c, pid, nid, 'unpublish a public app link');
+	const deps = c.get('deps');
+	const actor = c.get('user').id;
+	const authority = await authorizeWithdraw(c, pid, nid);
 	const existing = await service.getRelease(release_id);
 	if (!existing || existing.target.project_id !== pid || existing.target.notebook_id !== nid)
 		throw new NotFoundError('Public release not found');
-	let record = await service.requestUnpublish(release_id, 'user', c.get('user').id);
+	// Always through the service: it refuses a stale ID once the head names a replacement.
+	let record = await service.requestUnpublish(release_id, 'user', actor);
+	if (authority === 'emergency')
+		await appendAudit(
+			deps,
+			{ requestId: c.get('requestId'), method: c.req.method, path: c.req.path, userId: actor },
+			'public_release.emergency_unpublish',
+			() =>
+				deps.services.events.append({
+					event: 'public_release.emergency_unpublish',
+					actor,
+					project_id: pid,
+					notebook_id: nid,
+					release_id,
+					slug: existing.slug,
+					previous_state: existing.state,
+				}),
+		);
 	// One bounded attempt so a quick revoke confirms in the same request; the reconciler
 	// finishes anything left over.
 	try {

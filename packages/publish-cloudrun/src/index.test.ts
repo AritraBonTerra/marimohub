@@ -2,6 +2,7 @@ import { gunzipSync } from 'fflate';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { PublicReleaseHostFatalError } from '@marimo-hub/core/ports/public-release-host';
 import { CloudRunPublicReleaseHost, releaseTar } from './index';
+import type { CloudRunPublicReleaseHostConfig } from './index';
 import { sha256Digest } from './oci';
 
 const REGISTRY = 'us-west1-docker.pkg.dev';
@@ -19,14 +20,23 @@ interface Stored {
 	mediaType?: string;
 }
 
+interface FakePolicy {
+	bindings: { role: string; members: string[]; condition?: { expression: string } }[];
+	etag: string;
+	version?: number;
+}
+
 /** An OCI distribution registry plus the Cloud Run v2 and anonymous endpoints, all in memory. */
 class FakeGoogle {
 	blobs = new Map<string, Map<string, Uint8Array>>();
 	manifests = new Map<string, Map<string, Stored>>();
 	services = new Map<string, Record<string, unknown>>();
-	policies = new Map<string, { bindings: { role: string; members: string[] }[]; etag: string }>();
+	policies = new Map<string, FakePolicy>();
 	iamConflicts = 0;
-	requests: { method: string; url: string }[] = [];
+	iamFailures = new Set<string>();
+	requests: { method: string; url: string; authorization?: string }[] = [];
+	tokenScopes: string[][] = [];
+	iamWrites: FakePolicy[] = [];
 	baseDigest = '';
 	private uploads = 0;
 
@@ -99,8 +109,12 @@ class FakeGoogle {
 	fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
 		const url = new URL(input instanceof Request ? input.url : input.toString());
 		const method = init.method ?? 'GET';
-		this.requests.push({ method, url: url.toString() });
 		const headers = new Headers(init.headers);
+		this.requests.push({
+			method,
+			url: url.toString(),
+			authorization: headers.get('authorization') ?? undefined,
+		});
 		const body = init.body instanceof Uint8Array ? init.body : undefined;
 		if (url.host === REGISTRY) return this.registry(url, method, headers, body);
 		if (url.origin === RUN) return this.run(url, method, headers, init.body);
@@ -119,7 +133,9 @@ class FakeGoogle {
 			const basic = headers.get('authorization');
 			if (basic !== `Basic ${btoa('oauth2accesstoken:google-token')}`)
 				return new Response('', { status: 403 });
-			expect(url.searchParams.get('scope')).toMatch(/^repository:.+:pull,push$/);
+			const scopes = url.searchParams.getAll('scope');
+			for (const scope of scopes) expect(scope).toMatch(/^repository:[^:]+:(pull|pull,push)$/);
+			this.tokenScopes.push(scopes);
 			return Response.json({ token: 'registry-token' });
 		}
 		if (headers.get('authorization') !== 'Bearer registry-token')
@@ -204,16 +220,21 @@ class FakeGoogle {
 		const [name, verb] = path.slice(1).split(':') as [string, string | undefined];
 		const service = this.services.get(name);
 		if (!service) return new Response('', { status: 404 });
-		if (verb === 'getIamPolicy') return Response.json(this.policies.get(name));
+		if (verb === 'getIamPolicy') {
+			expect(url.searchParams.get('options.requestedPolicyVersion')).toBe('3');
+			if (this.iamFailures.has(name)) return new Response('', { status: 500 });
+			return Response.json(this.policies.get(name));
+		}
 		if (verb === 'setIamPolicy') {
 			if (this.iamConflicts > 0) {
 				this.iamConflicts--;
 				this.policies.get(name)!.etag += 'x';
 				return new Response('', { status: 409 });
 			}
-			const { policy } = JSON.parse(body as string) as {
-				policy: { bindings: { role: string; members: string[] }[]; etag: string };
-			};
+			const { policy } = JSON.parse(body as string) as { policy: FakePolicy };
+			this.iamWrites.push(policy);
+			if (policy.bindings.some((binding) => binding.condition) && policy.version !== 3)
+				return new Response('conditions need version 3', { status: 400 });
 			if (policy.etag !== this.policies.get(name)!.etag) return new Response('', { status: 412 });
 			if (policy.bindings.some((binding) => binding.members.length === 0))
 				return new Response('', { status: 400 });
@@ -280,22 +301,30 @@ const deployInput = () => ({
 	files: async () => files,
 });
 
-beforeEach(async () => {
-	google = new FakeGoogle();
-	await google.seedBase({ 'io.marimohub.installed-packages': '["marimo","Pandas"]' });
-	host = new CloudRunPublicReleaseHost({
+const RUNTIME_SA = 'mh-public-runtime@proj.iam.gserviceaccount.com';
+
+function makeHost(overrides: Partial<CloudRunPublicReleaseHostConfig> = {}) {
+	return new CloudRunPublicReleaseHost({
 		projectId: 'proj',
 		projectNumber: '123',
 		region: 'us-west1',
 		repository: 'marimo-public-releases',
 		baseImage: `${REGISTRY}/${BASE_NAME}@${google.baseDigest}`,
-		runtimeServiceAccount: 'mh-public-runtime@proj.iam.gserviceaccount.com',
+		runtimeServiceAccount: RUNTIME_SA,
 		instance: 'staging',
 		getToken: async () => 'google-token',
+		getPublisherEmail: async () => 'mh-publisher@proj.iam.gserviceaccount.com',
 		fetch: google.fetch,
 		runApiEndpoint: RUN,
 		probeDelayMs: 1,
+		...overrides,
 	});
+}
+
+beforeEach(async () => {
+	google = new FakeGoogle();
+	await google.seedBase({ 'io.marimohub.installed-packages': '["marimo","Pandas"]' });
+	host = makeHost();
 });
 
 describe('release layer', () => {
@@ -310,7 +339,7 @@ describe('release layer', () => {
 			['release/public/photo.png', '0', '444'],
 			['release/release.json', '0', '444'],
 		]);
-		expect(entries.every((e) => e.uid === 10001 && e.mtime === 0)).toBe(true);
+		expect(entries.every((e) => e.uid === 0 && e.mtime === 0)).toBe(true);
 	});
 
 	it('splits long paths into the ustar prefix', () => {
@@ -362,10 +391,17 @@ describe('CloudRunPublicReleaseHost', () => {
 					{
 						image: `${REGISTRY}/${TARGET_NAME}@${first.imageDigest}`,
 						startupProbe: { httpGet: { path: '/health', port: 8080 } },
+						livenessProbe: {
+							httpGet: { path: '/health', port: 8080 },
+							periodSeconds: 10,
+							timeoutSeconds: 2,
+							failureThreshold: 3,
+						},
 						env: [
 							{ name: 'PUBLIC_DASHBOARD_ORIGIN', value: ORIGIN },
 							{ name: 'PUBLIC_DASHBOARD_RELEASE', value: '/release' },
 							{ name: 'PUBLIC_DASHBOARD_ENTRYPOINT', value: 'notebook.py' },
+							{ name: 'PUBLIC_DASHBOARD_REQUIRE_MANIFEST', value: '1' },
 							{ name: 'HOME', value: '/tmp' },
 							{ name: 'MARIMO_SKIP_UPDATE_CHECK', value: '1' },
 							{ name: 'PYTHONDONTWRITEBYTECODE', value: '1' },
@@ -442,5 +478,134 @@ describe('CloudRunPublicReleaseHost', () => {
 		expect(await host.listManagedServices()).toEqual([
 			{ serviceName: SERVICE, releaseId: RELEASE_ID.toLowerCase(), publicInvoker: false },
 		]);
+	});
+
+	it('requests pull-only access to the base and pull,push only on the release repository', async () => {
+		await host.deployPrivate(deployInput());
+		expect(google.tokenScopes).toContainEqual([`repository:${BASE_NAME}:pull`]);
+		expect(google.tokenScopes).toContainEqual([`repository:${TARGET_NAME}:pull,push`]);
+		expect(google.tokenScopes).toContainEqual([
+			`repository:${TARGET_NAME}:pull,push`,
+			`repository:${BASE_NAME}:pull`,
+		]);
+		expect(google.tokenScopes.flat()).not.toContain(`repository:${BASE_NAME}:pull,push`);
+	});
+
+	it('refuses to deploy or expose when the publisher is the runtime identity', async () => {
+		const same = makeHost({ getPublisherEmail: async () => RUNTIME_SA.toUpperCase() });
+		await expect(same.deployPrivate(deployInput())).rejects.toMatchObject({
+			code: 'runtime_is_publisher',
+		});
+		await expect(
+			same.expose({ releaseId: RELEASE_ID, serviceName: SERVICE, origin: ORIGIN }),
+		).rejects.toMatchObject({ code: 'runtime_is_publisher' });
+		expect(google.services.size).toBe(0);
+		expect(google.requests).toEqual([]);
+	});
+
+	it('refuses a ready service that runs as another service account', async () => {
+		await host.deployPrivate(deployInput());
+		google.markReady();
+		(google.services.get(SERVICE)!.template as { serviceAccount: string }).serviceAccount =
+			'mh-publisher@proj.iam.gserviceaccount.com';
+		await expect(host.deployPrivate(deployInput())).rejects.toMatchObject({
+			code: 'service_account_mismatch',
+		});
+	});
+
+	it.each([
+		['publisher runtime identity', 'service_account_mismatch'],
+		['different release', 'service_conflict'],
+	] as const)('refuses to expose a service with %s', async (scenario, code) => {
+		await host.deployPrivate(deployInput());
+		google.markReady();
+		const service = google.services.get(SERVICE)!;
+		if (scenario === 'publisher runtime identity')
+			(service.template as { serviceAccount: string }).serviceAccount =
+				'mh-publisher@proj.iam.gserviceaccount.com';
+		else (service.labels as Record<string, string>)['marimohub-release-id'] = 'other';
+		await expect(
+			host.expose({ releaseId: RELEASE_ID, serviceName: SERVICE, origin: ORIGIN }),
+		).rejects.toMatchObject({ code });
+		expect(google.iamWrites).toEqual([]);
+	});
+
+	it('preserves conditional bindings and only treats unconditional allUsers as exposed', async () => {
+		await host.deployPrivate(deployInput());
+		google.markReady();
+		const conditional = {
+			role: 'roles/run.invoker',
+			members: ['allUsers', 'user:ops@example.com'],
+			condition: { expression: 'request.time < timestamp("2020-01-01T00:00:00Z")' },
+		};
+		const viewer = {
+			role: 'roles/run.viewer',
+			members: ['group:ops@example.com'],
+			condition: { expression: 'true' },
+		};
+		google.policies.set(SERVICE, { bindings: [conditional, viewer], etag: 'e0', version: 3 });
+		await host.expose({ releaseId: RELEASE_ID, serviceName: SERVICE, origin: ORIGIN });
+		expect(google.policies.get(SERVICE)).toMatchObject({
+			version: 3,
+			bindings: [conditional, viewer, { role: 'roles/run.invoker', members: ['allUsers'] }],
+		});
+
+		expect(await host.revoke({ releaseId: RELEASE_ID, serviceName: SERVICE })).toBe('absent');
+	});
+
+	it('revokes public members from conditional invoker bindings too', async () => {
+		await host.deployPrivate(deployInput());
+		const conditional = {
+			role: 'roles/run.invoker',
+			members: ['allAuthenticatedUsers', 'user:ops@example.com'],
+			condition: { expression: 'true' },
+		};
+		google.policies.set(SERVICE, { bindings: [conditional], etag: 'e0', version: 3 });
+		expect(await host.inspect(SERVICE)).toMatchObject({ publicInvoker: true });
+		expect(await host.revoke({ releaseId: RELEASE_ID, serviceName: SERVICE })).toBe('absent');
+		expect(google.iamWrites.at(-1)).toMatchObject({
+			version: 3,
+			bindings: [{ ...conditional, members: ['user:ops@example.com'] }],
+		});
+	});
+
+	it('keeps listing orphan candidates when one IAM read fails', async () => {
+		await host.deployPrivate(deployInput());
+		const other = 'marimo-public-orphan';
+		google.services.set(other, {
+			name: `projects/proj/locations/us-west1/services/${other}`,
+			labels: { 'marimohub-managed': 'true', 'marimohub-instance': 'staging' },
+		});
+		google.policies.set(other, { bindings: [], etag: 'e0' });
+		google.iamFailures.add(SERVICE);
+		expect(await host.listManagedServices()).toEqual([
+			{ serviceName: SERVICE, releaseId: RELEASE_ID.toLowerCase(), publicInvoker: false },
+			{ serviceName: other, releaseId: undefined, publicInvoker: false },
+		]);
+	});
+
+	it('passes the caller signal to token and Cloud Run requests', async () => {
+		const seen: (AbortSignal | undefined)[] = [];
+		const fetchSignals: AbortSignal[] = [];
+		const signalled = makeHost({
+			getToken: async (signal) => {
+				seen.push(signal);
+				return 'google-token';
+			},
+			fetch: (input, init) => {
+				if (init?.signal) fetchSignals.push(init.signal);
+				return google.fetch(input, init);
+			},
+		});
+		const controller = new AbortController();
+		await signalled.inspect(SERVICE, controller.signal);
+		expect(seen).toEqual([controller.signal]);
+		expect(fetchSignals).toHaveLength(1);
+		controller.abort(new Error('stop'));
+		expect(fetchSignals[0].aborted).toBe(true);
+	});
+
+	it('requires an installation id', () => {
+		expect(() => makeHost({ instance: '' })).toThrow('installation instance');
 	});
 });

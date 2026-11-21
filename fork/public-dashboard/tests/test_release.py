@@ -81,7 +81,8 @@ def live_release(
     tmp_path,
     *,
     connection_seconds=270,
-    max_connections=12,
+    max_sessions=6,
+    stuck_seconds=180,
     notebook=NOTEBOOK,
     sealed=False,
 ):
@@ -101,7 +102,8 @@ def live_release(
             (
                 "import uvicorn; from gateway import create_app; "
                 f"uvicorn.run(create_app(connection_seconds={connection_seconds}, "
-                f"max_connections={max_connections}), port={port})"
+                f"max_sessions={max_sessions}, stuck_seconds={stuck_seconds}, "
+                f"check_owner=False), port={port})"
             ),
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -228,17 +230,58 @@ def test_live_kernel_counts_against_budget_after_disconnect(tmp_path):
                 origin=origin,
             )
 
+        async def health_becomes(status):
+            while fetch(origin, "/health", "probe")[0] != status:
+                await asyncio.sleep(0.05)
+
         try:
             async with asyncio.timeout(8):
                 async with connect():
                     while not (tmp_path / "started").exists():
                         await asyncio.sleep(0.02)
+                    # A connected viewer keeps the instance live at full capacity.
+                    await asyncio.sleep(0.6)
+                    assert fetch(origin, "/health", "probe")[0] == 200
                 with pytest.raises(InvalidStatus) as limited:
                     async with connect():
                         pytest.fail("The disconnected kernel still occupies the slot")
                 assert limited.value.response.status_code == 403
+                await health_becomes(503)
         finally:
             (tmp_path / "stop").touch()
+        async with asyncio.timeout(8):
+            await health_becomes(200)
+            async with connect() as websocket:
+                while "Selected store district: North" not in await websocket.recv(
+                    decode=True
+                ):
+                    pass
 
-    with live_release(tmp_path, max_connections=1, notebook=notebook) as origin:
+    with live_release(
+        tmp_path, max_sessions=1, stuck_seconds=0.5, notebook=notebook
+    ) as origin:
         asyncio.run(check_budget(origin))
+
+
+def test_live_started_session_uses_one_slot(tmp_path):
+    async def check_two_sessions(origin):
+        async def started(websocket):
+            while "Selected store district: North" not in await websocket.recv(
+                decode=True
+            ):
+                pass
+
+        def connect():
+            return websockets.connect(
+                origin.replace("http:", "ws:") + f"/ws?session_id={uuid4()}",
+                origin=origin,
+            )
+
+        async with asyncio.timeout(10):
+            async with connect() as first:
+                await started(first)
+                async with connect() as second:
+                    await started(second)
+
+    with live_release(tmp_path, max_sessions=2) as origin:
+        asyncio.run(check_two_sessions(origin))

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { createServices, paths } from '@marimo-hub/core';
 import type { DeepLink, NotebookId, ProjectId, PublicReleaseRecord } from '@marimo-hub/core';
@@ -162,6 +162,34 @@ describe('public release routes', () => {
 		).toBeNull();
 	});
 
+	it('withdraws the live release while its cancelled replacement is still stopping', async () => {
+		const input = {
+			projectId: pid,
+			notebookId: nid,
+			slug: 'sales',
+			registrationId: link.registration_id,
+			versionId,
+			assets: [],
+			actor: ACTOR,
+		};
+		const service = services.publicReleases!;
+		const live = await service.publish(input);
+		await settle(live.release_id);
+		host.pollsUntilReady = 5;
+		const replacement = await service.publish(input);
+		await service.advance(replacement.release_id, 'test-worker');
+		host.pollsUntilDeleted = 5;
+		const stop = (releaseId: string) =>
+			api.request('POST', `${releasesPath()}/${releaseId}/unpublish`);
+		expect(await expectOk(await stop(replacement.release_id), 202)).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await expectOk(await stop(live.release_id), 202)).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await service.resolveManagedOrigin(link)).toBeNull();
+	});
+
 	it('rejects tokens, non-managers and stale asset hashes', async () => {
 		const body = { slug: 'sales', registration_id: link.registration_id, version_id: versionId };
 		const pat = apiAs(ACTOR, { kind: 'personal-access-token', id: 'tok' });
@@ -218,6 +246,141 @@ describe('public release routes', () => {
 		expect((await services.publicReleases!.getRelease(release.release_id))?.state).toBe(
 			'publishing',
 		);
+	});
+
+	it('lets the owner disconnect only a legacy release URL in managed mode', async () => {
+		const target = { kind: 'app' as const, project_id: pid, notebook_id: nid };
+		const legacy = `https://marimo-public-legacy${host.hostSuffix}`;
+		await services.deepLinks.setPublicOrigin('sales', target, link.registration_id, legacy);
+		const disconnect = {
+			slug: 'sales',
+			publication: { registration_id: link.registration_id, origin: null },
+		};
+		await services.projects.addMember(pid, { user_id: uid('manager') }, 'manager', ACTOR);
+		await expectError(
+			await apiAs(uid('manager')).request('POST', `${notebookPath()}/deep-links`, disconnect),
+			403,
+		);
+		await expectError(
+			await apiAs(ACTOR, { kind: 'personal-access-token', id: 'tok' }).request(
+				'POST',
+				`${notebookPath()}/deep-links`,
+				disconnect,
+			),
+			403,
+		);
+		const append = vi.spyOn(services.events, 'append');
+		expect(
+			await expectOk(await api.request('POST', `${notebookPath()}/deep-links`, disconnect)),
+		).toMatchObject({ public_origin: null });
+		expect(append).toHaveBeenCalledWith(
+			expect.objectContaining({ event: 'deep_link.public_origin_cleared', origin: legacy }),
+		);
+		// A reserved managed name left by an older server is never cleared as a legacy URL.
+		const managedName = `https://marimo-public-01j00000000000000000000000${host.hostSuffix}`;
+		await services.deepLinks.setPublicOrigin('sales', target, link.registration_id, managedName);
+		await expectError(await api.request('POST', `${notebookPath()}/deep-links`, disconnect), 409);
+		expect((await services.deepLinks.list(target))[0].public_origin).toBe(managedName);
+	});
+
+	it.each([undefined, 'https://marimo-public-legacy-123456.us-west1.run.app'])(
+		'never reports a legacy disconnect for a live managed release with stored origin %s',
+		async (storedOrigin) => {
+			const release = await expectOk<PublicReleaseRecord>(
+				await api.request('POST', releasesPath(), {
+					slug: 'sales',
+					registration_id: link.registration_id,
+					version_id: versionId,
+				}),
+				202,
+			);
+			await settle(release.release_id);
+			if (storedOrigin)
+				await services.deepLinks.setPublicOrigin(
+					link.slug,
+					link.target,
+					link.registration_id,
+					storedOrigin,
+				);
+			await expectError(
+				await api.request('POST', `${notebookPath()}/deep-links`, {
+					slug: 'sales',
+					publication: { registration_id: link.registration_id, origin: null },
+				}),
+				409,
+			);
+			expect((await services.publicReleases!.getRelease(release.release_id))?.state).toBe('active');
+			expect((await services.deepLinks.resolve(link.slug)).public_origin).toBe(storedOrigin);
+		},
+	);
+
+	it('lets a hub admin stop a release as an audited emergency without publishing', async () => {
+		const release = await expectOk<PublicReleaseRecord>(
+			await api.request('POST', releasesPath(), {
+				slug: 'sales',
+				registration_id: link.registration_id,
+				version_id: versionId,
+			}),
+			202,
+		);
+		await settle(release.release_id);
+		const adminId = uid('admin');
+		const admin = createTestApi({
+			bucket,
+			userId: adminId,
+			deps: { services, policy: { superAdmins: [adminId] } },
+		});
+		const adminToken = createTestApi({
+			bucket,
+			userId: adminId,
+			subject: { credential: { kind: 'personal-access-token', id: 'tok' } },
+			deps: { services, policy: { superAdmins: [adminId] } },
+		});
+		const unpublishPath = `${releasesPath()}/${release.release_id}/unpublish`;
+		await expectError(
+			await admin.request('POST', releasesPath(), {
+				slug: 'sales',
+				registration_id: link.registration_id,
+				version_id: versionId,
+			}),
+			403,
+		);
+		await expectError(await adminToken.request('POST', unpublishPath), 403);
+		await expectError(await apiAs(uid('outsider')).request('POST', unpublishPath), 403);
+		expect((await services.publicReleases!.getRelease(release.release_id))?.state).toBe('active');
+
+		const append = vi.spyOn(services.events, 'append');
+		const done = await expectOk<PublicReleaseRecord>(
+			await admin.request('POST', unpublishPath),
+			200,
+		);
+		expect(done.state).toBe('unpublished');
+		expect(append).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: 'public_release.emergency_unpublish',
+				actor: adminId,
+				release_id: release.release_id,
+				previous_state: 'active',
+			}),
+		);
+	});
+
+	it('refuses a stale unpublish once a replacement is live', async () => {
+		const publish = () =>
+			api.request('POST', releasesPath(), {
+				slug: 'sales',
+				registration_id: link.registration_id,
+				version_id: versionId,
+			});
+		const first = await expectOk<PublicReleaseRecord>(await publish(), 202);
+		await settle(first.release_id);
+		const second = await expectOk<PublicReleaseRecord>(await publish(), 202);
+		await settle(second.release_id);
+		await expectError(
+			await api.request('POST', `${releasesPath()}/${first.release_id}/unpublish`),
+			409,
+		);
+		expect((await services.publicReleases!.getRelease(second.release_id))?.state).toBe('active');
 	});
 
 	it('withdraws releases when the notebook is deleted', async () => {

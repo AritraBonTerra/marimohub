@@ -73,6 +73,8 @@ export interface PublicReleaseHost {
 		serviceName: string;
 		signal?: AbortSignal;
 	}): Promise<'absent' | 'deleting'>;
+	/** Mark the image eligible for repository cleanup after confirmed withdrawal. */
+	markImageRetired?(releaseId: string, imageDigest?: string, signal?: AbortSignal): Promise<void>;
 	inspect(serviceName: string, signal?: AbortSignal): Promise<PublicReleaseInspection>;
 	/** Unauthenticated GET `<origin>/health`. */
 	probeAnonymous(

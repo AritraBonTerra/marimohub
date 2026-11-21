@@ -810,9 +810,9 @@ Appends the frozen release as one read-only layer on a digest-pinned base image 
 | `MARIMOHUB_PUBLIC_RELEASE_GCP_REGION` | Cloud Run and Artifact Registry location. | Yes | — | `us-west1` |
 | `MARIMOHUB_PUBLIC_RELEASE_GCP_AR_REPO` | Docker repository that receives release images. | Yes | — | `marimo-public-releases` |
 | `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE` | Digest-pinned `fork/public-dashboard` base image in the same registry location. Its `io.marimohub.installed-packages` label lists the packages notebooks may import. | Yes | — | `us-west1-docker.pkg.dev/marimohub-public-apps/marimo-public-releases/base@sha256:…` |
-| `MARIMOHUB_PUBLIC_RELEASE_GCP_RUNTIME_SA` | Service account the dashboards run as. Grant it no roles. It must differ from the publisher identity. | Yes | — | `mh-public-runtime@marimohub-public-apps.iam.gserviceaccount.com` |
-| `MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY` 🔒 | Publisher service-account key JSON. Unset uses the metadata server identity of the hub. | — | — | — |
-| `MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE` | Label value that scopes orphan sweeps. Give each hub that shares a project and region its own value. | — | `default` | — |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_RUNTIME_SA` | Service account the dashboards run as. Grant it no roles. It must differ from the publisher identity; with no publisher key the hub compares it with its metadata server identity before the first deploy and refuses to serve a release that would run as the publisher. | Yes | — | `mh-public-runtime@marimohub-public-apps.iam.gserviceaccount.com` |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_SA_KEY` 🔒 | Publisher service-account key JSON. Unset uses the metadata server identity of the hub. A `token_uri` other than `https://oauth2.googleapis.com/token` is rejected. | — | — | — |
+| `MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE` | Label value that scopes unpublish and orphan sweeps, which delete services carrying it. Give each hub installation its own value and never change it while releases are live. | Yes | — | `acme-marimohub` |
 | `MARIMOHUB_PUBLIC_RELEASE_MAX_LIVE` | Maximum publishing, active or unpublishing releases across the hub. | — | `5` | — |
 | `MARIMOHUB_PUBLIC_RELEASE_MAX_ASSETS` | Maximum selected workspace files per release. | — | `50` | — |
 | `MARIMOHUB_PUBLIC_RELEASE_MAX_ASSET_BYTES` | Largest selectable workspace file. | — | `26214400` | — |

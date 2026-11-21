@@ -185,10 +185,10 @@ export class DeepLinkService {
 		slug: string,
 		target: DeepLinkTarget,
 		registrationId: string,
-		origin: string,
-	): Promise<void> {
+		origin: string | undefined,
+	): Promise<boolean> {
 		this.slug(slug);
-		await withCasRetry(this.bucket, async (cas) => {
+		return withCasRetry(this.bucket, async (cas) => {
 			const current = await this.read(slug);
 			if (
 				!current ||
@@ -197,12 +197,13 @@ export class DeepLinkService {
 				!sameTarget(current.record.target, target) ||
 				current.record.public_origin !== origin
 			)
-				return;
+				return false;
 			await cas.put(
 				paths.deepLink(slug),
 				JSON.stringify({ ...current.record, public_origin: null }),
 				{ onlyIfEtagMatches: current.etag },
 			);
+			return true;
 		});
 	}
 

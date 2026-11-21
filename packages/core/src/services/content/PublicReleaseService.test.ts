@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryBucket } from '@marimo-hub/core/testing/memory-bucket';
 import { FakePublicReleaseHost } from '@marimo-hub/core/testing/public-release-host';
 import { createServices } from '../index';
@@ -8,7 +8,12 @@ import type { DeepLinkTarget } from '../../deepLinks';
 import { ConflictError, ForbiddenError, ValidationError } from '../../errors';
 import { paths } from '../../paths';
 import { sha256Hex } from '../../internal/sha256';
-import { normalizeApprovedAssetPath, deriveAssetExposure } from '../../publicReleases';
+import { PublicReleaseHostFatalError } from '../../ports/publicReleaseHost';
+import {
+	normalizeApprovedAssetPath,
+	deriveAssetExposure,
+	PublicReleaseHeadSchema,
+} from '../../publicReleases';
 import type { PublicReleaseManifest, PublicReleaseRecord } from '../../publicReleases';
 
 let bucket: MemoryBucket;
@@ -47,6 +52,11 @@ async function putAsset(path: string, body: string) {
 
 async function link(slug = 'sales') {
 	return services.deepLinks.register(slug, target, ACTOR);
+}
+
+async function approvedOrigin(slug = 'sales', service = releases) {
+	const registered = await services.deepLinks.resolve(slug);
+	return service.resolvePublicOrigin(registered, registered.public_origin);
 }
 
 async function publish(
@@ -164,7 +174,7 @@ describe('PublicReleaseService', () => {
 		expect(active).toMatchObject({ state: 'active', image_digest: expect.any(String) });
 		const order = host.calls.map((c) => c.method);
 		expect(order.indexOf('deployPrivate')).toBeLessThan(order.indexOf('expose'));
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(release.origin);
+		expect(await approvedOrigin('sales')).toBe(release.origin);
 		expect(release.origin).toBe(
 			`https://marimo-public-${release.release_id.toLowerCase()}-123456.us-west1.run.app`,
 		);
@@ -248,10 +258,45 @@ describe('PublicReleaseService', () => {
 			'Cancel the replacement',
 		);
 		await releases.requestUnpublish(replacement.release_id, 'user');
-		await settle(replacement.release_id);
 		await releases.requestUnpublish(initial.release_id, 'user');
-		expect((await services.deepLinks.resolve(initial.slug)).public_origin).toBeNull();
+		expect(await approvedOrigin(initial.slug)).toBeNull();
 		await expect(publish()).rejects.toThrow('Unpublishing is already in progress');
+		expect(await settle(initial.release_id)).toMatchObject({ state: 'unpublished' });
+		expect(await settle(replacement.release_id)).toMatchObject({ state: 'failed' });
+		expect(await approvedOrigin(initial.slug)).toBeNull();
+	});
+
+	it('can stop the live app while an automatically failed replacement is withdrawing', async () => {
+		const live = await publish();
+		await settle(live.release_id);
+		const replacement = await publish();
+		host.hooks.expose = () => {
+			throw new PublicReleaseHostFatalError('test_failure', 'Synthetic release failure');
+		};
+		host.pollsUntilDeleted = 5;
+		expect(await releases.advance(replacement.release_id, 'worker-a')).toMatchObject({
+			state: 'unpublishing',
+			withdraw_reason: 'publish_failed',
+		});
+		expect(await releases.advance(replacement.release_id, 'worker-a')).toMatchObject({
+			state: 'unpublishing',
+		});
+		expect(await approvedOrigin()).toBe(live.origin);
+		await releases.requestUnpublish(live.release_id, 'user');
+		expect(await approvedOrigin()).toBeNull();
+	});
+
+	it('limits preview downloads while showing that more files exist', async () => {
+		const bounded = makeService({ limits: { maxAssetBytes: 6, maxTotalAssetBytes: 6 } });
+		await putAsset('a.txt', 'first');
+		await putAsset('b.txt', 'second');
+		const result = await bounded.listAssetCandidates(
+			target.project_id,
+			target.notebook_id,
+			versionId,
+		);
+		expect(result.assets.map(({ path }) => path)).toEqual(['a.txt']);
+		expect(result.truncated).toBe(true);
 	});
 
 	it('names runtime packages the notebook needs but the base image lacks', async () => {
@@ -294,11 +339,11 @@ describe('PublicReleaseService', () => {
 			throw new Error('cold start failed');
 		};
 		await releases.advance(second.release_id, 'worker-a');
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(first.origin);
+		expect(await approvedOrigin('sales')).toBe(first.origin);
 		host.hooks.expose = undefined;
 		clock += 60_000;
 		expect(await settle(second.release_id)).toMatchObject({ state: 'active' });
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(second.origin);
+		expect(await approvedOrigin('sales')).toBe(second.origin);
 		expect(await releases.getRelease(first.release_id)).toMatchObject({
 			state: 'unpublishing',
 			withdraw_reason: 'republish_superseded',
@@ -307,7 +352,7 @@ describe('PublicReleaseService', () => {
 		await expect(releases.requestUnpublish(first.release_id, 'user')).rejects.toThrow(
 			'The dashboard has changed',
 		);
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(second.origin);
+		expect(await approvedOrigin('sales')).toBe(second.origin);
 		expect(host.services.has(first.service_name)).toBe(false);
 	});
 
@@ -323,8 +368,159 @@ describe('PublicReleaseService', () => {
 			withdraw_reason: 'publish_failed',
 		});
 		expect(host.services.has(second.service_name)).toBe(false);
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(first.origin);
+		expect(await approvedOrigin('sales')).toBe(first.origin);
 		expect(await releases.getRelease(first.release_id)).toMatchObject({ state: 'active' });
+	});
+
+	it('keeps the predecessor live when cancellation wins the handoff', async () => {
+		const first = await publish();
+		await settle(first.release_id);
+		const second = await publish();
+		const oldPut = bucket.put.bind(bucket);
+		const headKey = paths.publicReleaseHead(first.registration_id);
+		const put = vi.spyOn(bucket, 'put').mockImplementation(async (key, value, options) => {
+			if (
+				key === headKey &&
+				typeof value === 'string' &&
+				PublicReleaseHeadSchema.parse(JSON.parse(value)).active_release_id === second.release_id
+			) {
+				put.mockRestore();
+				await releases.requestUnpublish(second.release_id, 'user', ACTOR);
+			}
+			return oldPut(key, value, options);
+		});
+		await releases.advance(second.release_id, 'worker-a');
+		expect(await approvedOrigin()).toBe(first.origin);
+		await releases.advance(first.release_id, 'worker-a');
+		expect(await releases.getRelease(first.release_id)).toMatchObject({ state: 'active' });
+		expect(await releases.getRelease(second.release_id)).toMatchObject({ state: 'unpublishing' });
+	});
+
+	it('keeps withdrawals progressing when another release cannot be read', async () => {
+		const broken = await publish([], 'broken');
+		await settle(broken.release_id);
+		const withdrawing = await publish();
+		await settle(withdrawing.release_id);
+		await releases.requestUnpublish(withdrawing.release_id, 'user', ACTOR);
+		const originalGet = bucket.get.bind(bucket);
+		const get = vi.spyOn(bucket, 'get').mockImplementation(async (...args) => {
+			if (args[0] === paths.publicRelease(broken.release_id)) throw new Error('Unreadable record');
+			return originalGet(...args);
+		});
+		await releases.reconcileTick('worker-a');
+		get.mockRestore();
+		expect(await releases.getRelease(withdrawing.release_id)).toMatchObject({
+			state: 'unpublished',
+		});
+		expect(host.services.has(withdrawing.service_name)).toBe(false);
+	});
+
+	it('lists head records even when an unrelated indexed release cannot be read', async () => {
+		const active = await publish();
+		await settle(active.release_id);
+		const otherNotebook = await services.notebooks.createNotebook(
+			target.project_id,
+			{ title: 'Other', description: '', code: 'import marimo' },
+			ACTOR,
+		);
+		const otherTarget = { ...target, notebook_id: otherNotebook.id };
+		const otherLink = await services.deepLinks.register('other', otherTarget, ACTOR);
+		const broken = await releases.publish({
+			projectId: target.project_id,
+			notebookId: otherNotebook.id,
+			slug: otherLink.slug,
+			registrationId: otherLink.registration_id,
+			versionId: (await services.notebooks.getNotebook(target.project_id, otherNotebook.id)).source
+				.current_version_id!,
+			assets: [],
+			actor: ACTOR,
+		});
+		const originalGet = bucket.get.bind(bucket);
+		const get = vi.spyOn(bucket, 'get').mockImplementation(async (...args) => {
+			if (args[0] === paths.publicRelease(broken.release_id)) throw new Error('Unreadable record');
+			return originalGet(...args);
+		});
+		try {
+			expect(await releases.listForNotebook(target.project_id, target.notebook_id)).toMatchObject([
+				{ active_release_id: active.release_id, releases: [{ release_id: active.release_id }] },
+			]);
+			await expect(releases.listForNotebook(target.project_id, otherNotebook.id)).rejects.toThrow(
+				'Unreadable record',
+			);
+		} finally {
+			get.mockRestore();
+		}
+	});
+
+	it('revokes the direct URL before retrying legacy pointer cleanup', async () => {
+		const release = await publish();
+		await settle(release.release_id);
+		await services.deepLinks.setPublicOrigin(
+			release.slug,
+			target,
+			release.registration_id,
+			release.origin,
+		);
+		const clear = vi
+			.spyOn(services.deepLinks, 'clearPublicOrigin')
+			.mockRejectedValueOnce(new Error('Unreadable legacy pointer'));
+		try {
+			await releases.requestUnpublish(release.release_id, 'user');
+			expect(clear).not.toHaveBeenCalled();
+			expect(await approvedOrigin()).toBeNull();
+			expect(await releases.advance(release.release_id, 'worker-a')).toMatchObject({
+				state: 'unpublished',
+			});
+			expect(host.services.has(release.service_name)).toBe(false);
+			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBe(release.origin);
+			await releases.reconcileTick('worker-a');
+			expect((await services.deepLinks.resolve(release.slug)).public_origin).toBeNull();
+		} finally {
+			clear.mockRestore();
+		}
+	});
+
+	it('frees release capacity while terminal legacy pointer cleanup is still retrying', async () => {
+		const capped = makeService({ limits: { maxLiveReleases: 1 } });
+		const release = await publish([], 'sales', capped);
+		await settle(release.release_id, capped);
+		const clear = vi
+			.spyOn(services.deepLinks, 'clearPublicOrigin')
+			.mockRejectedValue(new Error('Unreadable legacy pointer'));
+		try {
+			await capped.requestUnpublish(release.release_id, 'user');
+			expect(await capped.advance(release.release_id, 'worker-a')).toMatchObject({
+				state: 'unpublished',
+			});
+			expect(await (await bucket.get(paths.publicReleaseLiveIndex))?.text()).toContain(
+				release.release_id,
+			);
+			expect(await publish([], 'other', capped)).toMatchObject({ state: 'publishing' });
+		} finally {
+			clear.mockRestore();
+		}
+	});
+
+	it('indexes the release before uploading and cleans up a partial bundle', async () => {
+		await link();
+		const oldPut = bucket.put.bind(bucket);
+		let stagedId = '';
+		const put = vi.spyOn(bucket, 'put').mockImplementation(async (key, value, options) => {
+			if (key.endsWith('/bundle/release.json')) {
+				stagedId = key.split('/')[2];
+				const index = await bucket.get(paths.publicReleaseLiveIndex);
+				expect(await index?.text()).toContain(stagedId);
+				await releases.reconcileTick('worker-a');
+				expect(host.called('deployPrivate')).toBe(0);
+				throw new Error('Bundle upload failed');
+			}
+			return oldPut(key, value, options);
+		});
+		await expect(publish()).rejects.toThrow('Bundle upload failed');
+		put.mockRestore();
+		expect(await bundleKeys(stagedId)).toEqual([]);
+		expect(await releases.getRelease(stagedId)).toMatchObject({ state: 'failed' });
+		expect(host.called('deployPrivate')).toBe(0);
 	});
 
 	it('withdraws an exposed service when the link disappears before the swap', async () => {
@@ -367,7 +563,7 @@ describe('PublicReleaseService', () => {
 		const withdrawn = await fenced.getRelease(republish.release_id);
 		expect(withdrawn).toMatchObject({ state: 'unpublishing' });
 		expect(withdrawn!.fenced_until).toBeGreaterThan(clock + 60_000);
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(release.origin);
+		expect(await approvedOrigin('sales')).toBe(release.origin);
 
 		expect(await fenced.advance(republish.release_id, 'worker-b')).toMatchObject({
 			state: 'unpublishing',
@@ -395,7 +591,7 @@ describe('PublicReleaseService', () => {
 		expect(host.services.has(republish.service_name)).toBe(false);
 		const index = await bucket.get(paths.publicReleaseLiveIndex);
 		expect(await index?.text()).not.toContain(republish.release_id);
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBe(release.origin);
+		expect(await approvedOrigin('sales')).toBe(release.origin);
 	});
 
 	it('confirms a clean unpublish immediately and records audit events', async () => {
@@ -403,7 +599,7 @@ describe('PublicReleaseService', () => {
 		const release = await publish();
 		await settle(release.release_id);
 		await releases.requestUnpublish(release.release_id, 'user', ACTOR);
-		expect((await services.deepLinks.resolve('sales')).public_origin).toBeNull();
+		expect(await approvedOrigin('sales')).toBeNull();
 		expect(await releases.advance(release.release_id, 'worker-b')).toMatchObject({
 			state: 'unpublished',
 		});
@@ -422,6 +618,29 @@ describe('PublicReleaseService', () => {
 		);
 	});
 
+	it('marks an image retired only after Cloud Run and the anonymous probe confirm withdrawal', async () => {
+		const markImageRetired = vi
+			.fn<NonNullable<typeof releases.host.markImageRetired>>()
+			.mockResolvedValue(undefined);
+		const service = makeService({ host: Object.assign(host, { markImageRetired }) });
+		const release = await publish([], 'sales', service);
+		const active = await settle(release.release_id, service);
+		expect(markImageRetired).not.toHaveBeenCalled();
+		await service.requestUnpublish(release.release_id, 'user');
+		vi.spyOn(host, 'probeAnonymous').mockResolvedValueOnce({ status: 200 });
+		await service.advance(release.release_id, 'worker-b');
+		expect(markImageRetired).not.toHaveBeenCalled();
+		clock += 6_000;
+		expect(await service.advance(release.release_id, 'worker-b')).toMatchObject({
+			state: 'unpublished',
+		});
+		expect(markImageRetired).toHaveBeenCalledWith(
+			release.release_id,
+			active?.image_digest,
+			expect.any(AbortSignal),
+		);
+	});
+
 	it('records a failed revoke and confirms on a later retry', async () => {
 		const release = await publish();
 		await settle(release.release_id);
@@ -431,7 +650,10 @@ describe('PublicReleaseService', () => {
 		};
 		expect(await releases.advance(release.release_id, 'worker-a')).toMatchObject({
 			state: 'unpublishing',
-			error: { message: 'Cloud Run unavailable' },
+			error: {
+				code: 'host_error',
+				message: 'The publishing service could not complete the operation',
+			},
 		});
 		host.hooks.revoke = undefined;
 		expect(await settle(release.release_id)).toMatchObject({ state: 'unpublished' });
@@ -469,16 +691,6 @@ describe('PublicReleaseService', () => {
 					ACTOR,
 				),
 			'security_labeled',
-		],
-		[
-			'origin drift',
-			() =>
-				services.deepLinks
-					.resolve('sales')
-					.then((l) =>
-						services.deepLinks.setPublicOrigin('sales', target, l.registration_id, null),
-					),
-			'link_changed',
 		],
 		[
 			'deletion',
@@ -524,7 +736,7 @@ describe('PublicReleaseService', () => {
 		expect(await releases.getRelease(release.release_id)).toMatchObject({
 			withdraw_reason: 'publish_failed',
 		});
-		expect((await services.deepLinks.resolve('manual')).public_origin).toBe(
+		expect(await approvedOrigin('manual')).toBe(
 			'https://marimo-public-manual-123456.us-west1.run.app',
 		);
 	});

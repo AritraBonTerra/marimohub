@@ -15924,6 +15924,12 @@ paths:
       tags:
         - App links
       summary: Register a globally unique app slug
+      description: 'With `publication`, attaches or disconnects a legacy manual
+        release URL instead. Both need a browser session as the project owner
+        and are audited. Attaching also needs an unlabeled notebook and an
+        approved non-managed release URL, and is refused while managed
+        publishing is enabled. Disconnecting (`origin: null`) only clears a
+        legacy URL, never a managed release.'
       parameters:
         - schema:
             type: string
@@ -16330,7 +16336,11 @@ paths:
       summary: List workspace files that can be approved for a public release
       description: Hidden files, generated caches, the notebook entrypoint and
         `pyproject.toml` are never listed. Only photos under `public/` are
-        web-served; other files are readable from Python only.
+        web-served; other files are readable from Python only. Git-synced
+        notebooks list the files saved with `version_id`; other notebooks list
+        the current workspace files, and publishing freezes the bytes that match
+        the approved hashes. `truncated` is true when only a bounded preview of
+        the workspace is listed.
       security: *a5
       parameters:
         - schema:
@@ -16404,6 +16414,8 @@ paths:
                             - exposure
                             - selectable
                           additionalProperties: false
+                      truncated:
+                        type: boolean
                     required:
                       - version_id
                       - entrypoint
@@ -16476,7 +16488,9 @@ paths:
       summary: Stop a public dashboard
       description: Clears the app link redirect immediately. Returns 200 once the host
         confirms the direct release URL refuses anonymous visitors, or 202 while
-        revocation continues in the background.
+        revocation continues in the background. The project owner can stop the
+        current or pending release of the link; a hub super admin can do the
+        same as an audited emergency action without being able to publish.
       security: *a5
       parameters:
         - schema:

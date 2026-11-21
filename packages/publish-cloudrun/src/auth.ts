@@ -1,14 +1,15 @@
 import { importPKCS8, SignJWT } from 'jose';
 
 const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
-const METADATA_TOKEN_URL =
-	'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
-const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
+const METADATA_ACCOUNT_URL =
+	'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default';
+/** The only OAuth endpoint a signed service-account assertion may be sent to. */
+const GOOGLE_TOKEN_URI = 'https://oauth2.googleapis.com/token';
+const REQUEST_TIMEOUT_MS = 15_000;
 
 interface ServiceAccountKey {
 	client_email: string;
 	private_key: string;
-	token_uri?: string;
 }
 
 function parseKey(raw: string): ServiceAccountKey {
@@ -22,13 +23,33 @@ function parseKey(raw: string): ServiceAccountKey {
 		typeof parsed.private_key !== 'string'
 	)
 		throw new Error('Invalid service account key: expected client_email and private_key');
-	const tokenUri =
-		'token_uri' in parsed && typeof parsed.token_uri === 'string' ? parsed.token_uri : undefined;
-	return {
-		client_email: parsed.client_email,
-		private_key: parsed.private_key,
-		token_uri: tokenUri,
-	};
+	// A key file chooses where its signed assertion goes; accept only Google's token endpoint.
+	if (
+		'token_uri' in parsed &&
+		parsed.token_uri !== undefined &&
+		parsed.token_uri !== GOOGLE_TOKEN_URI
+	)
+		throw new Error(`Invalid service account key: token_uri must be ${GOOGLE_TOKEN_URI}`);
+	return { client_email: parsed.client_email, private_key: parsed.private_key };
+}
+
+/** Combine the caller's signal with a per-request timeout. */
+export function bounded(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/** The metadata server answers only with `Metadata-Flavor: Google` and never redirects. */
+async function metadata(path: string, fetchImpl: typeof fetch, signal?: AbortSignal) {
+	const response = await fetchImpl(`${METADATA_ACCOUNT_URL}/${path}`, {
+		headers: { 'Metadata-Flavor': 'Google' },
+		redirect: 'error',
+		signal: bounded(signal, REQUEST_TIMEOUT_MS),
+	});
+	if (!response.ok) throw new Error(`Metadata server request failed: ${response.status}`);
+	if (response.headers.get('metadata-flavor') !== 'Google')
+		throw new Error('Metadata server response had no Metadata-Flavor header');
+	return response;
 }
 
 async function readToken(response: Response): Promise<{ token: string; expiresIn: number }> {
@@ -46,47 +67,65 @@ async function readToken(response: Response): Promise<{ token: string; expiresIn
 	return { token: body.access_token, expiresIn };
 }
 
+export interface GoogleCredentials {
+	/** Cached cloud-platform access token. */
+	getToken(signal?: AbortSignal): Promise<string>;
+	/** Email of the identity `getToken` acts as. */
+	getEmail(signal?: AbortSignal): Promise<string>;
+}
+
 /**
- * Cached Google access token from a service-account key, or from the GCE/Cloud Run
- * metadata server when no key is configured.
+ * Google credentials from a service-account key, or from the GCE/Cloud Run metadata
+ * server when no key is configured. Every request is bounded by the caller's signal
+ * and a timeout, and credentials go only to Google's fixed endpoints.
  */
-export function googleAccessToken(
+export function googleCredentials(
 	options: { serviceAccountKey?: string; fetch?: typeof fetch } = {},
-): () => Promise<string> {
+): GoogleCredentials {
 	const fetchImpl = options.fetch ?? fetch;
 	const key = options.serviceAccountKey ? parseKey(options.serviceAccountKey) : undefined;
 	let cached: { token: string; expiresAt: number } | undefined;
-	return async () => {
-		if (cached && cached.expiresAt > Date.now()) return cached.token;
-		let result;
-		if (key) {
-			const tokenUri = key.token_uri || DEFAULT_TOKEN_URI;
-			const assertion = await new SignJWT({ scope: SCOPE })
-				.setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
-				.setIssuer(key.client_email)
-				.setSubject(key.client_email)
-				.setAudience(tokenUri)
-				.setIssuedAt()
-				.setExpirationTime('1h')
-				.sign(await importPKCS8(key.private_key.replaceAll('\\n', '\n'), 'RS256'));
-			result = await readToken(
-				await fetchImpl(tokenUri, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-					body: new URLSearchParams({
-						grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-						assertion,
+	let email: string | undefined;
+	return {
+		async getToken(signal) {
+			if (cached && cached.expiresAt > Date.now()) return cached.token;
+			let result;
+			if (key) {
+				const assertion = await new SignJWT({ scope: SCOPE })
+					.setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+					.setIssuer(key.client_email)
+					.setSubject(key.client_email)
+					.setAudience(GOOGLE_TOKEN_URI)
+					.setIssuedAt()
+					.setExpirationTime('1h')
+					.sign(await importPKCS8(key.private_key.replaceAll('\\n', '\n'), 'RS256'));
+				result = await readToken(
+					await fetchImpl(GOOGLE_TOKEN_URI, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+							assertion,
+						}),
+						redirect: 'error',
+						signal: bounded(signal, REQUEST_TIMEOUT_MS),
 					}),
-				}),
-			);
-		} else {
-			result = await readToken(
-				await fetchImpl(`${METADATA_TOKEN_URL}?scopes=${encodeURIComponent(SCOPE)}`, {
-					headers: { 'Metadata-Flavor': 'Google' },
-				}),
-			);
-		}
-		cached = { token: result.token, expiresAt: Date.now() + (result.expiresIn - 60) * 1000 };
-		return result.token;
+				);
+			} else {
+				result = await readToken(
+					await metadata(`token?scopes=${encodeURIComponent(SCOPE)}`, fetchImpl, signal),
+				);
+			}
+			cached = { token: result.token, expiresAt: Date.now() + (result.expiresIn - 60) * 1000 };
+			return result.token;
+		},
+		async getEmail(signal) {
+			if (key) return key.client_email;
+			if (email) return email;
+			const value = (await (await metadata('email', fetchImpl, signal)).text()).trim();
+			if (!value) throw new Error('Metadata server returned no service account email');
+			email = value;
+			return email;
+		},
 	};
 }

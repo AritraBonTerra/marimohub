@@ -82,27 +82,40 @@ pass against the new lockfile.
 With `MARIMOHUB_PUBLIC_RELEASE_BACKEND=gcp-cloud-run`, the project owner
 signed in through the browser opens **Share app → App links → Publish**, chooses a
 saved version, and checks the workspace files to include. No file is selected by
-default. Personal access tokens and service accounts cannot publish. Projects and
+default. For a local notebook, the saved version pins the code and selected files
+come from the current workspace. For a Git-synced notebook, both come from the
+saved version. The preview shows up to 500 candidates and limits how many bytes
+it reads. Personal access tokens and service accounts cannot publish. Projects and
 notebooks with security labels cannot publish. Adding labels later withdraws
-their releases.
+their releases. A hub administrator can withdraw a managed release through
+App Links when the owner is unavailable.
 
 The hub copies the exact version and file bytes into an immutable bundle with a
 `release.json` manifest. The maintenance replica appends that bundle as one
 read-only layer on the base image, deploys a private `marimo-public-<release-id>`
 service, then grants `allUsers` invoker. It moves `/app/<slug>` only after anonymous
 `/health` and `/` return 200. A republish keeps the old release live until the new
-one takes over, then retires the old one. **Unpublish** clears the redirect at once.
+one takes over, then retires the old one. The registration selects the active
+release in one conditional write. Cancelling before that write leaves the
+previous dashboard live. **Unpublish** cuts off the redirect at once.
 The dialog reports the release stopped only after Cloud Run reports the service
 deleted and an anonymous request is refused. Active viewers are disconnected when
 the service is deleted. The exact disconnect time has not been measured on Cloud
 Run.
 
-When `release.json` is present the gateway refuses to start unless every listed
-file matches its SHA-256 and size and no other file exists. Set
-`PUBLIC_DASHBOARD_ENTRYPOINT` to serve a notebook other than `notebook.py`.
-Responses carry `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and
-`X-Robots-Tag: noindex, nofollow`.
+Managed releases require `release.json`. The gateway verifies every listed
+file's SHA-256 and size and rejects extra files. Manual releases can also provide
+that manifest. The container runs as a non-root user. Release paths are
+root-owned and read-only. Set `PUBLIC_DASHBOARD_ENTRYPOINT` to serve a notebook
+other than `notebook.py`.
+
+The gateway caps widget requests at 64 KiB and gives the body 10 seconds to
+arrive. Each instance admits six concurrent sessions and 30 session starts per
+minute. A viewer holds a slot until its socket closes and its kernel stops. If
+detached kernels occupy every slot for
+three minutes with no open viewer, `/health` returns 503 and Cloud Run's liveness
+probe can restart the dashboard. The gateway also sets a content security policy
+that limits framing, plugins, and the document's base URL.
 
 ### Build the base image
 
@@ -115,7 +128,7 @@ docker build --target base \
 	-t REGION-docker.pkg.dev/PROJECT/REPO/base .
 ```
 
-Push it to the release repository and set `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE`
+Build the base image from the same source revision as the hub. Push it to the release repository and set `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE`
 to the pushed digest. The hub rejects a notebook whose `pyproject.toml` or inline
 script metadata names a package missing from that list. Without the label it
 skips the check, and a missing package fails when the dashboard runs.
@@ -133,14 +146,33 @@ Provision these first:
   and a custom role with `run.services.create`, `get`, `list`, `delete`,
   `getIamPolicy`, `setIamPolicy` and `run.operations.get`.
 
-Cloud Run service creation and IAM are project-scoped. In a shared project, the
-publisher can delete or expose other Cloud Run services there. The adapter only
-touches services named `marimo-public-*` with this hub's `marimohub-managed` and
-`marimohub-instance` labels, but IAM does not enforce that. Alert on Cloud Run
-`SetIamPolicy` and `DeleteService` audit logs outside `marimo-public-*`, and set a
-billing budget. Give each hub that shares a project and region its own
-`MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE`; the orphan sweep deletes unrecognized
-services that carry its label.
+Cloud Run service creation is project-scoped. The adapter checks service names
+and ownership labels before granting public access or retiring a service. Each
+hub in a project and region needs a unique, stable
+`MARIMOHUB_PUBLIC_RELEASE_GCP_INSTANCE`. Keep that identifier and its bucket
+together during restoration. A different bucket under the same identifier makes
+the existing services appear orphaned.
+
+For a shared project, ask a GCP administrator to attach a Resource Manager tag
+such as `hub-protection=private` to the private hub and other private Cloud Run
+services. Apply a [project IAM deny rule](https://docs.cloud.google.com/iam/docs/deny-access)
+for the publisher principal on the permissions below, conditioned on
+`resource.matchTagId('tagKeys/KEY_ID', 'tagValues/VALUE_ID')`.
+
+- `run.googleapis.com/services.setIamPolicy`
+- `run.googleapis.com/services.delete`
+- `run.googleapis.com/services.update`
+- `run.googleapis.com/services.deleteTagBinding`
+
+Use the publisher's `principal://iam.googleapis.com/projects/-/serviceAccounts/PUBLISHER_EMAIL`
+identifier. Give the publisher no access to edit that policy or remove its
+protection. Use IAM Policy Troubleshooter to confirm the publisher is denied on
+the private hub and allowed to manage a synthetic public release. Check both
+outcomes before enabling managed publishing. Alert on Cloud Run `SetIamPolicy`
+and `DeleteService` by the publisher outside `marimo-public-*`, and set a billing
+budget. [Cloud Run tags](https://docs.cloud.google.com/run/docs/configuring/tags)
+and [deniable permissions](https://docs.cloud.google.com/iam/docs/deny-permissions-support)
+describe the provider controls.
 
 Verify the deployment with a synthetic notebook and synthetic files before any
 real release. Check `/app/<slug>` signed out, a widget change, an approved photo, a
@@ -155,11 +187,28 @@ Unpublish with an open socket.
   are readable from Python only. marimo function-call widgets and `/@file/` virtual
   files are not supported.
 - Release services can reach the Cloud Run metadata server and the internet.
-- Release images stay in Artifact Registry after unpublishing. Use a cleanup policy;
-  never delete an image while its service exists.
-- Packaging requires the registry to accept the base image's layers in the release
-  image. The Artifact Registry token exchange, blob mount and cold start have been
-  exercised only against an in-memory registry and Cloud Run fake.
+- Packaging requires Artifact Registry to accept the base image's layers in the
+  release image. Test a synthetic publish when changing the base repository,
+  publisher identity, or Cloud Run region.
+
+### Retain release images
+
+After verified withdrawal, the publisher marks that release image with a
+`retired-<release-id>` tag. Its registry writer role can create tags. Configure
+[the repository cleanup policy](artifact-cleanup.json) in dry-run mode first.
+
+```sh
+gcloud artifacts set-cleanup-policies REPOSITORY \
+  --project PROJECT --location REGION \
+  --policy artifact-cleanup.json --dry-run
+```
+
+The policy matches retired dashboard versions that are at least 30 days old.
+Tag every base image you intend to keep with a `base-` prefix. Check the
+[Artifact Registry dry-run logs](https://docs.cloud.google.com/artifact-registry/docs/repositories/cleanup-policy#verify-dry-run)
+against active release and base digests before enabling deletion. Investigate
+`public_release_image_retirement_failed` logs for any images that still need
+tagging. Tags alone never expose or delete a service.
 
 ## Share through the hub (manual)
 

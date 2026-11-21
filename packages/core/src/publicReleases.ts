@@ -5,10 +5,21 @@ import { ulidString, utcTimestamp } from './stringFormats';
 import { ValidationError } from './errors';
 
 export const PUBLIC_RELEASE_SERVICE_PREFIX = 'marimo-public-';
+const ReleaseIdSchema = ulidString();
 const SHA256 = /^[0-9a-f]{64}$/;
 const PUBLIC_PHOTO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif']);
 const MAX_ASSET_PATH_BYTES = 200;
 const pathEncoder = new TextEncoder();
+
+/** Reserve generated Cloud Run service names for the managed lifecycle. */
+export function isManagedPublicReleaseOrigin(origin: string, hostSuffix: string): boolean {
+	const prefix = `https://${PUBLIC_RELEASE_SERVICE_PREFIX}`;
+	return (
+		origin.startsWith(prefix) &&
+		origin.endsWith(hostSuffix) &&
+		ReleaseIdSchema.safeParse(origin.slice(prefix.length, -hostSuffix.length).toUpperCase()).success
+	);
+}
 
 /** Split an archive path into the byte-limited name and prefix fields of a ustar header. */
 export function splitReleaseTarPath(path: string): { name: string; prefix: string } | null {
@@ -89,6 +100,7 @@ export const PublicReleaseRecordSchema = z.looseObject({
 	fenced_until: z.number().int().optional(),
 	next_retry_at: z.number().int().optional(),
 	deadline_at: z.number().int(),
+	staging: z.literal(true).optional(),
 	bundle_cleaned: z.boolean().optional(),
 	error: z.object({ code: z.string(), message: z.string() }).optional(),
 	created_by: UserIdSchema,
@@ -110,6 +122,8 @@ export const PublicReleaseHeadSchema = z.looseObject({
 	/** At most one publish in flight per registration; claimed by CAS. */
 	pending_release_id: ulidString().nullable(),
 	withdrawing_release_id: ulidString().optional(),
+	cancelling_release_id: ulidString().optional(),
+	managed_activated: z.literal(true).optional(),
 	last_release_id: ulidString().nullable(),
 	updated_at: utcTimestamp(),
 });
