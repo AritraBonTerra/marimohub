@@ -128,7 +128,7 @@ docker build --target base \
 	-t REGION-docker.pkg.dev/PROJECT/REPO/base .
 ```
 
-Push it to the release repository and set `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE`
+Build the base image from the same source revision as the hub. Push it to the release repository and set `MARIMOHUB_PUBLIC_RELEASE_GCP_BASE_IMAGE`
 to the pushed digest. The hub rejects a notebook whose `pyproject.toml` or inline
 script metadata names a package missing from that list. Without the label it
 skips the check, and a missing package fails when the dashboard runs.
@@ -191,7 +191,7 @@ Unpublish with an open socket.
   release image. Test a synthetic publish when changing the base repository,
   publisher identity, or Cloud Run region.
 
-### Retain release images and prepare rollback
+### Retain release images
 
 After verified withdrawal, the publisher marks that release image with a
 `retired-<release-id>` tag. Its registry writer role can create tags. Configure
@@ -209,15 +209,6 @@ Tag every base image you intend to keep with a `base-` prefix. Check the
 against active release and base digests before enabling deletion. Investigate
 `public_release_image_retirement_failed` logs for any images that still need
 tagging. Tags alone never expose or delete a service.
-
-New versions use the registration head for managed redirects. Before rolling
-back to a hub version that reads managed redirects from the app link record,
-unpublish all managed releases and verify their direct URLs are offline.
-Deploy a base image from the same code as the hub before turning its managed
-publisher on. For rollback to a version predating public links, first remove
-and re-create any affected app-link registrations with their original slugs
-during a maintenance window. Those versions reject the newer
-`public_origin` field, including its explicit null value.
 
 ## Share through the hub (manual)
 
