@@ -1568,6 +1568,8 @@ describe('forwardHttp', () => {
 				'cf-access-client-secret': 'svc-secret',
 				'X-Goog-IAP-JWT-Assertion': 'iap-proof',
 				'X-Custom-Assertion': 'custom-proof',
+				'X-Mhub-App-Jobs-Credential': 'mhub_app_forged',
+				'X-Mhub-App-Jobs-Url': 'https://evil.example.com',
 				'x-custom': 'passes',
 			},
 		});
@@ -1582,6 +1584,8 @@ describe('forwardHttp', () => {
 		expect(seen['cf-access-client-secret']).toBeUndefined();
 		expect(seen['x-goog-iap-jwt-assertion']).toBeUndefined();
 		expect(seen['x-custom-assertion']).toBeUndefined();
+		expect(seen['x-mhub-app-jobs-credential']).toBeUndefined();
+		expect(seen['x-mhub-app-jobs-url']).toBeUndefined();
 		expect(seen['x-custom']).toBe('passes');
 	});
 

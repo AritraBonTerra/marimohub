@@ -262,6 +262,25 @@ describe('attachSandboxProxyUpgrade', () => {
 			expect(lastUpstreamHeaders!.authorization).toBeUndefined();
 		});
 
+		it('strips client-supplied app-jobs headers', async () => {
+			const { deps, token } = await runningProxySession(upstreamOrigin);
+			const server = fakeUpgradeServer();
+			attachSandboxProxyUpgrade(server, deps);
+			const socket = new PassThrough();
+			const req = fakeIncomingMessage(`/proxy/${token}/`);
+			req.headers['x-mhub-app-jobs-credential'] = 'mhub_app_forged';
+			req.headers['X-MHUB-APP-JOBS-URL'] = 'https://evil.example.com';
+			req.headers['x-custom'] = 'passes';
+			lastUpstreamHeaders = undefined;
+
+			server.listeners[0](req, socket, Buffer.alloc(0));
+
+			await vi.waitFor(() => expect(socket.destroyed).toBe(true));
+			expect(lastUpstreamHeaders!['x-custom']).toBe('passes');
+			expect(lastUpstreamHeaders!['x-mhub-app-jobs-credential']).toBeUndefined();
+			expect(lastUpstreamHeaders!['x-mhub-app-jobs-url']).toBeUndefined();
+		});
+
 		it('dials a strip-prefix surface at the path beneath its proxy prefix', async () => {
 			const { deps, token, services, session } = await runningProxySession('http://kernel');
 			await services.sessions.setSurfaceState(session.project_id, session.session_id, 'vscode', {

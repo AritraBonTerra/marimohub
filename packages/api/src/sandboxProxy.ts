@@ -517,7 +517,7 @@ async function loadAdmission(
 				deps.metrics,
 			).view(projectId, session.notebook_id);
 			const allowed = view.canAccess(user.id, sessionId, !session.app_pool);
-			if (!session.preview)
+			if (!session.preview && sessionAudience(session) !== 'public')
 				assignmentGenerations = view.activeAssignmentGenerations(user.id, sessionId);
 			if (!allowed) {
 				return rejectProxy(410, 'GONE', 'The app assignment expired. Open the app again.');
@@ -573,7 +573,7 @@ const HOP_BY_HOP = new Set([
 /**
  * Notebook code can read request headers. HTTP and WebSocket proxies strip hub
  * credentials, including Access assertions, service tokens, and cookies.
- * Only the session's kernel token reaches the notebook, plus, for app sessions, the
+ * Only the session's kernel token reaches the notebook, plus, for members' app sessions, the
  * endpoint-bound app-jobs credential that `/api/app-jobs/v1` alone accepts.
  */
 export const CREDENTIAL_HEADERS = new Set([

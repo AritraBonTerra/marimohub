@@ -2,7 +2,7 @@
 
 `marimohub.jobs` runs jobs as the signed-in visitor without API tokens.
 It supports published apps with proxy exposure and browser SSO or development authentication.
-Preview apps and direct subdomain exposure are not supported.
+Preview apps, public app links, and direct subdomain exposure are not supported.
 
 Enable consumer execution on each job that the app calls.
 Create `Jobs` inside each visitor's marimo session:

@@ -13,6 +13,7 @@ import {
 	verifyProxyToken,
 	verifyAppJobCredential,
 	signAppJobCredential,
+	sessionAudience,
 	sessionMode,
 	toPublicJobRun,
 	ForbiddenError,
@@ -57,7 +58,8 @@ export function createAppJobsApp(deps: ApiDeps) {
 		if (!claims)
 			return fail(c, 'UNAUTHORIZED', 'App credential expired or invalid. Reopen the app.', 401);
 		const routing = await verifyProxyToken(claims.routingToken, exposure.signingSecret);
-		if (!routing) return fail(c, 'UNAUTHORIZED', 'Invalid app credential', 401);
+		if (routing?.audience !== 'authenticated')
+			return fail(c, 'UNAUTHORIZED', 'Invalid app credential', 401);
 		const admission = await authorizeProxyRequest(
 			new Request(`${new URL(c.req.url).origin}/proxy/${claims.routingToken}/`),
 			{
@@ -73,7 +75,7 @@ export function createAppJobsApp(deps: ApiDeps) {
 			routing.projectId,
 			SessionId.parse(admission.sessionId),
 		);
-		if (sessionMode(session) !== 'app' || session.preview)
+		if (sessionMode(session) !== 'app' || session.preview || sessionAudience(session) === 'public')
 			throw new ForbiddenError('App jobs require a published app');
 		const pid = routing.projectId;
 		const nid = session.notebook_id;

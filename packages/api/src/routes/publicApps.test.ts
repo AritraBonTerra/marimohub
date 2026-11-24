@@ -320,6 +320,62 @@ describe('Public app links', () => {
 		expect(hbOldTokenAfterRepublish.status).toBe(404);
 	});
 
+	it('public proxy request carries no x-mhub-app-jobs-credential header', async () => {
+		const { bucket, project, notebook } = await setupProjectAndNotebook();
+		// A signed-in member with jobs enabled would receive a credential on a member app.
+		const client = createTestApi({
+			bucket,
+			compute: makeFakeCompute(),
+			deps: {
+				publicApps: makePublicConfig(),
+				sandbox: {
+					...createTestApi({ bucket }).deps.sandbox,
+					exposure: new ProxyExposure(PROXY_SECRET),
+					appBaseUrl: 'https://hub.example.com',
+				},
+			},
+		});
+		expect(client.deps.jobs).toBeDefined();
+		const base = `/projects/${project.id}/notebooks/${notebook.id}/deep-links`;
+		const link = await expectOk<DeepLink>(await client.request('POST', base, { slug: 'jobs' }));
+		await expectOk(
+			await client.request('PATCH', `${base}/jobs`, {
+				registration_id: link.registration_id,
+				access: { mode: 'public' },
+			}),
+		);
+		const { sandbox_url, visit_token } = await expectOk<{
+			sandbox_url: string;
+			visit_token: string;
+		}>(
+			await client.app.request('/api/public/v1/visits', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ slug: 'jobs' }),
+			}),
+		);
+		const request = () =>
+			new Request(`https://hub.example.com${new URL(sandbox_url).pathname}`, {
+				headers: {
+					Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${visit_token}`,
+					'X-Mhub-App-Jobs-Credential': 'mhub_app_forged',
+					'X-Mhub-App-Jobs-Url': 'https://evil.example.com',
+					'X-Custom': 'passes',
+				},
+			});
+
+		const decision = await authorizeProxyRequest(request(), client.deps);
+		expect(decision.kind).toBe('forward');
+		expect(decision).not.toHaveProperty('appJobCredential');
+
+		const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok'));
+		expect((await client.app.request(request())).status).toBe(200);
+		const headers = new Headers(upstream.mock.calls[0][1]?.headers);
+		expect(headers.get('x-custom')).toBe('passes');
+		expect(headers.has('x-mhub-app-jobs-credential')).toBe(false);
+		expect(headers.has('x-mhub-app-jobs-url')).toBe(false);
+	});
+
 	it('passes project-only integration scope only when double-opted-in (Option A)', async () => {
 		const { bucket, project, notebook } = await setupProjectAndNotebook();
 		const resolveForSession = vi.fn(async () => ({

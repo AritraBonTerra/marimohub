@@ -53,7 +53,7 @@ initiating visit closes. Applications own progress displays; external links gran
 
 App code can run opted-in jobs as the signed-in visitor with the `marimohub.jobs` helper.
 It needs no API token. It works in published apps with proxy exposure and browser SSO or
-development sign-in.
+development sign-in, but not through public app links.
 
 ```python
 from marimohub.jobs import Jobs
