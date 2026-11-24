@@ -337,7 +337,8 @@ jobs:
         run: docker logs marimohub-ci
 
   dependency-review:
-    if: github.event_name == 'pull_request'
+    # Needs the dependency graph, which forks have off by default.
+    if: github.event_name == 'pull_request' && github.repository == 'marimo-team/marimohub'
     runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
