@@ -1,3 +1,5 @@
+import { createAppJobsApp } from './jobs/appJobs';
+import { APP_JOBS_PATH } from './jobs/appJobsEndpoint';
 import { requestMemoMiddleware } from './requestMemo';
 import notebookMovesApp from './routes/notebookMoves';
 import searchApp from './routes/search';
@@ -42,6 +44,7 @@ import projectsApp from './routes/projects';
 import projectAlertsApp from './routes/projectAlerts';
 import integrationsApp from './routes/integrations';
 import jobsApp from './routes/jobs';
+import projectRunsApp from './routes/projectRuns';
 import deepLinksApp from './routes/deepLinks';
 import publicAppsApp from './routes/publicApps';
 import appsApp from './routes/apps';
@@ -500,6 +503,7 @@ export function createApi(rawDeps: ApiDeps) {
 	app.route('/', createOidcDiscovery(deps));
 	app.route('/', createMcpApp(deps));
 	app.route('/api/host/v1', createHostApp(deps));
+	app.route(APP_JOBS_PATH, createAppJobsApp(deps));
 
 	// Managed-AI proxy. Notebook kernels call it server-to-server with a minted
 	// session token (no app cookie), so it mounts OUTSIDE the `/api/v1/*` cookie-auth
@@ -674,6 +678,7 @@ export function createApi(rawDeps: ApiDeps) {
 	app.route(API_PREFIX, workingBranchesApp);
 	app.route(API_PREFIX, sessionsApp);
 	app.route(API_PREFIX, jobsApp);
+	app.route(API_PREFIX, projectRunsApp);
 	app.route(API_PREFIX, integrationsApp);
 	app.route(API_PREFIX, usersApp);
 	app.route(API_PREFIX, tokensApp);

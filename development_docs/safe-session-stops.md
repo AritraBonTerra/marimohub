@@ -39,7 +39,40 @@ old predecessor. Internal causes, runtime paths, tokens, and lease IDs are omitt
 from public responses. MCP `stop_session` exposes the same deliberate retry fields
 and reports retained or pending outcomes explicitly.
 
+## Proxy save intent
+
+After a successful runtime save, the proxy persists a new `Session.save_dirty` generation
+before it admits capture work. This covers kernel saves and marimo host API saves
+(`/api/marimo/v1/notebooks/{id}/save`) sent through the proxy. The response waits for the
+persistence attempt, not for artifact capture. Without a background-work host, the proxy
+schedules no capture and the lifecycle sweep captures instead.
+Persistence failures leave the runtime response unchanged and emit `session_save_intent_failed`.
+
+A hub host protocol save (`/api/host/v1`) persists the generation and captures before it
+responds. A capture that is not durable returns a conflict; the intent stays for the sweep.
+
+The local queue admits at most 64 sessions. Each burst makes at most four capture
+attempts, with 100, 200, and 400 ms delays after consecutive failures. A capture that
+lost editor ownership is not retried.
+Overflow, scheduling failure, and process exit leave recorded intent in the session.
+
+Any replica's lifecycle sweep can discover that intent, even with periodic snapshots
+disabled. The sweep processes at most eight sessions concurrently, oldest attempt first.
+Without an attempt, it uses the save time or session start time.
+A retry waits at least one minute after the persisted `last_capture_attempt_at`, or the
+configured snapshot interval if shorter. With the default 60-second sweep interval, the
+retry runs at most about two minutes after the failed attempt.
+
+Capture still requires editor ownership and the notebook publication fence.
+A successful capture clears only the dirty generation it observed.
+A newer save remains pending. Remote sources need no capture, so the sweep clears their
+observed generation. Periodic capture also reconciles edits without save hints.
+
 ## Publication and runtime recovery
+
+`NotebookService.prepareSessionCapture` validates notebook metadata and reads the source head once, without loading the README.
+Remote sources need no capture. Local sources return a publication token from that source observation.
+The coordinator acquires the token before ownership checks and runtime reads. Publication uses the token's ETag to reject stale captures.
 
 NotebookService is the sole writer of local `source.json` publication heads.
 It stages immutable code, dependencies, and capture sidecars, then publishes their
@@ -69,8 +102,12 @@ For the deployment and backup rules, see
 ## Operations
 
 Monitor `sessions.save.acknowledged`, `sessions.save.hint_failed`,
-`sessions.capture.durable`, and `sessions.capture.durable_lag_ms`. The durable-capture
-metrics count stop captures, periodic snapshots, and host saves.
+`sessions.save.capture_deferred`, `sessions.capture.durable`, and
+`sessions.capture.durable_lag_ms`.
+`capture_deferred` counts saves that exceed local queue capacity.
+`hint_failed` counts persistence, scheduling, and thrown capture failures.
+The corresponding `session_save_{intent,schedule,capture}_failed` logs identify the session and cause. The durable-capture
+metrics count proxy save captures, host protocol saves, periodic snapshots, and stop captures.
 `sessions.stop.retained` and `sessions.stop.forced` count outcomes; the
 `sessions.stop.pending_age_ms`, `sessions.stop.retained_age_ms`, and matching `_count`
 gauges identify stalled work. Telemetry failures do not change save outcomes.
@@ -116,6 +153,26 @@ cd packages/notebook-bridge/python
 python -m unittest test_lifecycle test_lifecycle_linux
 ```
 
-The native tests cover a save overlapping prepare, checkpoint output restoration,
-resume, committed stop, and supervisor crash recovery. On other platforms, the
-Linux integration tests skip; the hermetic lifecycle tests still run.
+The native tests cover saves overlapping prepare, checkpoint restoration, resume,
+and committed stop. They kill the runtime process group, then restore source and
+native outputs in a fresh runtime. They also kill the supervisor after its stop
+receipt is durable but before it destroys writers. Recovery must finish the stop
+without resuming those writers. The Linux tests skip on other platforms.
+
+`apps/server/src/captureDurability.test.ts` kills publisher processes at artifact
+upload, source-head publication, and durable-receipt boundaries. Fresh processes
+read the persisted source and output pair, check that incomplete captures leave
+the save dirty, and retry. Cases include unchanged source with new outputs, stale
+publication tokens, replacement editors, and lost publication acknowledgements.
+Run this suite with:
+
+```sh
+pnpm exec vp test apps/server/src/captureDurability.test.ts
+```
+
+Publisher tests use core services and filesystem storage, with one writer at a
+time. They do not exercise the capture coordinator, PostgreSQL transactions,
+provider destruction, or concurrent replicas. Native tests retain checkpoint
+bytes outside the killed runtime to represent a published capture. They do not
+send those bytes through hub storage. End-to-end provider recovery needs a
+separate acceptance run.

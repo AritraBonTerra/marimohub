@@ -25,7 +25,11 @@ import { notebookBridgePaths, resolveBridgeLauncher } from './notebookBridgePath
 import type { Bucket } from '../../ports/bucket';
 import { MARIMO_PORT } from '../../constants';
 import { Millis } from '../../duration';
-import { PythonEnvironmentSetupError, UnavailableError } from '../../errors';
+import {
+	PythonEnvironmentSetupError,
+	RuntimeCaptureSetupError,
+	UnavailableError,
+} from '../../errors';
 import type { SourceControlCommitIdentity } from '../../ports/sourceControl';
 import type { NotebookId, ProjectId, SandboxId, UserId } from '../../ids';
 import { effectivePersistenceMode } from './sessionPersistence';
@@ -476,6 +480,23 @@ function provisionFailure(step: string, err: unknown): UnavailableError {
 	// failed on, credentials included, and this string is shown to the caller and
 	// persisted on the session record.
 	return new UnavailableError(parts.join(' '), { cause: err });
+}
+
+function notebookBridgeFailure(options: ProvisionOptions, error: unknown): void {
+	// Capture is required for safe publication and stop; the UI extension is optional.
+	if (options.runtimeCapture)
+		throw error instanceof RuntimeCaptureSetupError
+			? error
+			: provisionFailure('preparing runtime capture', error);
+	logEvent(
+		{
+			level: 'warn',
+			event: 'notebook_bridge_unavailable',
+			reason: 'prepare_failed',
+			sandbox_id: options.sandboxId,
+		},
+		{ channel: 'warn' },
+	);
 }
 
 function supervisedLaunchFailure(result: SandboxLaunchFailure, timeoutMs: number): Error {
@@ -1012,17 +1033,14 @@ export class SandboxProvisioner {
 					await sandbox.writeFiles([...batch, ...bridgeFiles]);
 				} catch (error) {
 					if (bridgeFiles.length === 0) throw error;
+					// Retry each half alone so the error names the write that actually failed.
 					if (batch.length > 0) await writeFiles(batch);
-					bridgeUnavailable = true;
-					logEvent(
-						{
-							level: 'warn',
-							event: 'notebook_bridge_unavailable',
-							reason: 'prepare_failed',
-							sandbox_id: options.sandboxId,
-						},
-						{ channel: 'warn' },
-					);
+					try {
+						await writeFiles(bridgeFiles);
+					} catch (bridgeError) {
+						notebookBridgeFailure(options, bridgeError);
+						bridgeUnavailable = true;
+					}
 				}
 			})();
 			const started = Date.now();
@@ -1224,14 +1242,14 @@ export class SandboxProvisioner {
 		launchStrategy: MarimoLaunchStrategyName,
 		writeFiles = sandbox.writeFiles.bind(sandbox),
 	): Promise<string | undefined> {
+		if (options.launchMode === 'job' || launchStrategy === 'uv-sandbox') return;
+		if (!options.bridgeParentOrigin && !options.runtimeCapture) return;
 		const payload = options.notebookBridge;
-		if (
-			!payload ||
-			(!options.bridgeParentOrigin && !options.runtimeCapture) ||
-			options.launchMode === 'job' ||
-			launchStrategy === 'uv-sandbox'
-		)
+		if (!payload) {
+			if (options.runtimeCapture)
+				throw new RuntimeCaptureSetupError('the notebook bridge payload is not configured');
 			return;
+		}
 		const { directory } = notebookBridgePaths(options.sandboxId, payload.launcher);
 		try {
 			await withSandboxSpan(sw, 'bridge_prepare', (time) =>
@@ -1247,20 +1265,17 @@ export class SandboxProvisioner {
 					),
 				),
 			);
-			return resolveBridgeLauncher(sandbox, {
+			const launcher = resolveBridgeLauncher(sandbox, {
 				sandboxId: options.sandboxId,
 				launcher: payload.launcher,
 			});
-		} catch {
-			logEvent(
-				{
-					level: 'warn',
-					event: 'notebook_bridge_unavailable',
-					reason: 'prepare_failed',
-					sandbox_id: options.sandboxId,
-				},
-				{ channel: 'warn' },
-			);
+			if (options.runtimeCapture && !launcher)
+				throw new RuntimeCaptureSetupError(
+					`the sandbox cannot resolve the bridge launcher ${payload.launcher}`,
+				);
+			return launcher;
+		} catch (error) {
+			notebookBridgeFailure(options, error);
 			return;
 		}
 	}
@@ -1274,7 +1289,7 @@ export class SandboxProvisioner {
 		if (!options.bridgeParentOrigin && !options.runtimeCapture) return;
 		try {
 			const budget = startup.deadline.timeoutMs === 0 ? 10_000 : remainingStartupMs(startup);
-			if (budget <= 0) return;
+			if (budget <= 0) throw new Error('Bridge configuration deadline exceeded');
 			await withDeadline(
 				sandbox.setEnvVars({
 					...(options.bridgeParentOrigin
@@ -1303,20 +1318,17 @@ export class SandboxProvisioner {
 					timeoutError: () => new Error('Bridge configuration timed out'),
 				},
 			);
-			startup.plan.start = startup.plan.start.replace(
+			const start = startup.plan.start.replace(
 				/(?:python -m )?marimo --quiet /,
 				`python ${shellQuote(launcher)} --quiet `,
 			);
-		} catch {
-			logEvent(
-				{
-					level: 'warn',
-					event: 'notebook_bridge_unavailable',
-					reason: 'prepare_failed',
-					sandbox_id: options.sandboxId,
-				},
-				{ channel: 'warn' },
-			);
+			if (options.runtimeCapture && start === startup.plan.start)
+				throw new RuntimeCaptureSetupError(
+					'the sandbox start command does not launch marimo, so the bridge launcher cannot wrap it',
+				);
+			startup.plan.start = start;
+		} catch (error) {
+			notebookBridgeFailure(options, error);
 		}
 	}
 

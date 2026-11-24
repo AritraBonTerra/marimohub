@@ -738,6 +738,7 @@ export function createServices(
 		runExists: run,
 		listRuns: job,
 		listRunsPage: job,
+		scanRunsPage: job,
 	});
 	const maintenance = wrap('MaintenanceService', new MaintenanceService(bucket, metrics));
 	const idempotency = wrap('IdempotencyService', new IdempotencyService(metadata), {
@@ -764,7 +765,7 @@ export function createServices(
 		'MigrationService',
 		new MigrationService(
 			bucket,
-			backgroundMigrations(bucket, projects, sessions),
+			backgroundMigrations(bucket, projects, sessions, jobRuns),
 			retiredMigrations,
 		),
 	);
@@ -943,3 +944,9 @@ export type { WorkingBranchSave, WorkingBranchRecord } from './content/workingBr
 
 export { MigrationInspectionSchema } from './catalog/migrationInspection';
 export { SessionCaptureCoordinator } from './runtime/SessionCaptureCoordinator';
+export {
+	APP_JOB_CREDENTIAL_REFRESH_WINDOW_MS,
+	signAppJobCredential,
+	verifyAppJobCredential,
+} from './runtime/appJobCredential';
+export type { AppJobCredentialClaims } from './runtime/appJobCredential';

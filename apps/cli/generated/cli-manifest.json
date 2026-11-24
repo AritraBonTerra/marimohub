@@ -2820,6 +2820,22 @@
 						"repeatable": false
 					},
 					{
+						"name": "consumer_execution",
+						"cli_name": "consumer-execution",
+						"required": false,
+						"description": "Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false.",
+						"value_type": "boolean",
+						"repeatable": false
+					},
+					{
+						"name": "consumer_history",
+						"cli_name": "consumer-history",
+						"required": false,
+						"description": "Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.",
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
 						"name": "enabled",
 						"cli_name": "enabled",
 						"required": false,
@@ -3157,6 +3173,7 @@
 			"method": "GET",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/jobs/{jid}/runs",
 			"summary": "List a job’s runs",
+			"description": "Runs are ordered by descending run ID. Project lists and filtered job lists scan at most limit entries (maximum 500). Follow next_cursor even on empty pages. Status and access are read live. Restart from the first page to refresh active runs.",
 			"parameters": [
 				{
 					"name": "jid",
@@ -3196,6 +3213,33 @@
 					"in": "query",
 					"required": false,
 					"value_type": "integer",
+					"repeatable": false
+				},
+				{
+					"name": "status",
+					"cli_name": "status",
+					"in": "query",
+					"required": false,
+					"description": "Exact status, or active for queued, provisioning, and running.",
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "triggered_by",
+					"cli_name": "triggered-by",
+					"in": "query",
+					"required": false,
+					"description": "Exact triggering user ID.",
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "triggered_by_me",
+					"cli_name": "triggered-by-me",
+					"in": "query",
+					"required": false,
+					"description": "Filter to the authenticated user. Cannot be combined with triggered_by.",
+					"value_type": "string",
 					"repeatable": false
 				}
 			],
@@ -3304,6 +3348,14 @@
 						"description": "String parameters passed to the notebook as `--key value` after `--`, readable via `mo.cli_args()`. Parameters are visible to every project member who can read the job or its run history; do not store secrets here.",
 						"value_type": "object",
 						"repeatable": false
+					},
+					{
+						"name": "tags",
+						"cli_name": "tags",
+						"required": false,
+						"description": "Immutable submission tags. Exact-match history filters use these values; tags never grant access.",
+						"value_type": "object",
+						"repeatable": false
 					}
 				]
 			},
@@ -3361,6 +3413,22 @@
 						"name": "concurrency_policy",
 						"cli_name": "concurrency-policy",
 						"required": false,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "consumer_execution",
+						"cli_name": "consumer-execution",
+						"required": false,
+						"description": "Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false.",
+						"value_type": "boolean",
+						"repeatable": false
+					},
+					{
+						"name": "consumer_history",
+						"cli_name": "consumer-history",
+						"required": false,
+						"description": "Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.",
 						"value_type": "string",
 						"repeatable": false
 					},
@@ -6064,6 +6132,88 @@
 			},
 			"destructive": false,
 			"paginated": false,
+			"response_kind": "json",
+			"accepts_if_match": false,
+			"accepts_idempotency_key": false
+		},
+		{
+			"id": "projects.runs.list",
+			"command": ["projects", "runs", "list"],
+			"method": "GET",
+			"path": "/api/v1/projects/{pid}/runs",
+			"summary": "List project runs by status, triggering user, or submission tag",
+			"description": "Runs are ordered by descending run ID. Project lists and filtered job lists scan at most limit entries (maximum 500). Follow next_cursor even on empty pages. Status and access are read live. Restart from the first page to refresh active runs.",
+			"parameters": [
+				{
+					"name": "pid",
+					"cli_name": "pid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "cursor",
+					"cli_name": "cursor",
+					"in": "query",
+					"required": false,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "limit",
+					"cli_name": "limit",
+					"in": "query",
+					"required": false,
+					"value_type": "integer",
+					"repeatable": false
+				},
+				{
+					"name": "status",
+					"cli_name": "status",
+					"in": "query",
+					"required": false,
+					"description": "Exact status, or active for queued, provisioning, and running.",
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "tag_key",
+					"cli_name": "tag-key",
+					"in": "query",
+					"required": false,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "tag_value",
+					"cli_name": "tag-value",
+					"in": "query",
+					"required": false,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "triggered_by",
+					"cli_name": "triggered-by",
+					"in": "query",
+					"required": false,
+					"description": "Exact triggering user ID.",
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "triggered_by_me",
+					"cli_name": "triggered-by-me",
+					"in": "query",
+					"required": false,
+					"description": "Filter to the authenticated user. Cannot be combined with triggered_by.",
+					"value_type": "string",
+					"repeatable": false
+				}
+			],
+			"destructive": false,
+			"paginated": true,
 			"response_kind": "json",
 			"accepts_if_match": false,
 			"accepts_idempotency_key": false

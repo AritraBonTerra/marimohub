@@ -4,9 +4,10 @@ One line per accepted finding: the endpoint plus the finding's description,
 backticks included (format details in `../README.md`). Remove entries after
 the PR merges — a stale entry masks future accidental breaks.
 
-Pre-release pass over the unreleased session startup stream (#699): the `text/event-stream`
-response content gains a typed `SessionStartupEvent` schema in place of a plain string. Remove after merge.
+Merge of upstream 0.7.2 (#734): the authorization action enums gain `job.trigger`. oasdiff reports the
+two `cases` subschemas as replaced because the fork's `deep-link.publish` sits in the same enums; with
+references resolved, no value was removed. Remove after merge.
 
 ```text
-POST /api/v1/projects/{pid}/notebooks/{nid}/sessions added `subschema #1, subschema #2, subschema #3` to the response body `oneOf` list for the response status `200`
+POST /api/v1/admin/policy-analyzer/evaluate removed `subschema #1, subschema #2` from the `cases/items/` request property `anyOf` list
 ```

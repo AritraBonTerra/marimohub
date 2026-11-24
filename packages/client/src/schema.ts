@@ -2041,7 +2041,10 @@ export interface paths {
 			path?: never;
 			cookie?: never;
 		};
-		/** List a job’s runs */
+		/**
+		 * List a job’s runs
+		 * @description Runs are ordered by descending run ID. Project lists and filtered job lists scan at most limit entries (maximum 500). Follow next_cursor even on empty pages. Status and access are read live. Restart from the first page to refresh active runs.
+		 */
 		get: operations['jobs.runs.list'];
 		put?: never;
 		/**
@@ -2124,6 +2127,26 @@ export interface paths {
 		 * @description Raw text, editor-only: logs can echo environment values and tracebacks the viewer role cannot otherwise read. 404 with code `NO_RUN_OUTPUT` when none were captured.
 		 */
 		get: operations['jobs.runs.logs'];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	'/api/v1/projects/{pid}/runs': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		/**
+		 * List project runs by status, triggering user, or submission tag
+		 * @description Runs are ordered by descending run ID. Project lists and filtered job lists scan at most limit entries (maximum 500). Follow next_cursor even on empty pages. Status and access are read live. Restart from the first page to refresh active runs.
+		 */
+		get: operations['projects.runs.list'];
 		put?: never;
 		post?: never;
 		delete?: never;
@@ -3059,6 +3082,7 @@ export interface components {
 					| 'SERVICE_UNAVAILABLE'
 					| 'SESSION_PERSISTENCE_REQUIRED'
 					| 'PYTHON_ENV_SETUP_FAILED'
+					| 'RUNTIME_CAPTURE_SETUP_FAILED'
 					| 'RESOURCE_EXHAUSTED'
 					| 'SURFACE_NOT_ENABLED'
 					| 'SURFACE_UNAVAILABLE'
@@ -3072,6 +3096,7 @@ export interface components {
 					| 'PAYLOAD_TOO_LARGE'
 					| 'NO_HTML_SNAPSHOT'
 					| 'NO_RUN_OUTPUT'
+					| 'STREAM_EXPIRED'
 					| 'INTERNAL_ERROR';
 				message: string;
 				/** @description Field-level validation failures. */
@@ -3201,6 +3226,7 @@ export interface components {
 			jobs: {
 				available: boolean;
 				max_per_notebook: number | null;
+				/** @description Queued-run threshold for accepting new manual submissions. Scheduled runs and retries may exceed this value. */
 				max_queued_runs_per_job: number | null;
 				default_timeout_seconds: number | null;
 				max_timeout_seconds: number | null;
@@ -3851,6 +3877,7 @@ export interface components {
 					| 'audit.global.read'
 					| 'directory.search'
 					| 'app.read'
+					| 'job.trigger'
 					| 'project.read'
 					| 'project.update'
 					| 'project.delete'
@@ -4047,6 +4074,7 @@ export interface components {
 								| 'audit.global.read'
 								| 'directory.search'
 								| 'app.read'
+								| 'job.trigger'
 								| 'project.read'
 								| 'project.update'
 								| 'project.delete'
@@ -4084,6 +4112,7 @@ export interface components {
 				| 'audit.global.read'
 				| 'directory.search'
 				| 'app.read'
+				| 'job.trigger'
 				| 'project.read'
 				| 'project.update'
 				| 'project.delete'
@@ -4999,6 +5028,13 @@ export interface components {
 			notebook_id: string;
 			project_id: string;
 			name: string;
+			/** @description Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false. */
+			consumer_execution?: boolean;
+			/**
+			 * @description Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.
+			 * @enum {string}
+			 */
+			consumer_history?: 'private' | 'shared';
 			enabled: boolean;
 			schedule?: components['schemas']['JobSchedule'];
 			parameters?: components['schemas']['JobParameters'];
@@ -5050,6 +5086,13 @@ export interface components {
 		JobCreateBody: {
 			/** @example Nightly refresh */
 			name: string;
+			/** @description Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false. */
+			consumer_execution?: boolean;
+			/**
+			 * @description Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.
+			 * @enum {string}
+			 */
+			consumer_history?: 'private' | 'shared';
 			/** @default true */
 			enabled: boolean;
 			schedule?: components['schemas']['JobSchedule'];
@@ -5069,6 +5112,13 @@ export interface components {
 		};
 		JobUpdateBody: {
 			name?: string;
+			/** @description Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false. */
+			consumer_execution?: boolean;
+			/**
+			 * @description Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.
+			 * @enum {string}
+			 */
+			consumer_history?: 'private' | 'shared';
 			enabled?: boolean;
 			schedule?: {
 				/**
@@ -5102,6 +5152,9 @@ export interface components {
 			} | null;
 		};
 		JobRun: {
+			tags?: {
+				[key: string]: string;
+			};
 			run_id: string;
 			job_id: string;
 			notebook_id: string;
@@ -5173,9 +5226,23 @@ export interface components {
 			cancelled_by?: string;
 		};
 		JobRunTriggerBody: {
+			/**
+			 * @description Immutable submission tags. Exact-match history filters use these values; tags never grant access.
+			 * @example {
+			 *       "app": "calibration-runner",
+			 *       "app_version": "v3"
+			 *     }
+			 */
+			tags?: {
+				[key: string]: string;
+			};
 			parameters?: components['schemas']['JobParameters'];
 		};
 		JobRunPage: {
+			items: components['schemas']['JobRun'][];
+			next_cursor: string | null;
+		};
+		ProjectRunPage: {
 			items: components['schemas']['JobRun'][];
 			next_cursor: string | null;
 		};
@@ -5568,6 +5635,7 @@ export interface components {
 							| 'audit.global.read'
 							| 'directory.search'
 							| 'app.read'
+							| 'job.trigger'
 							| 'project.read'
 							| 'project.update'
 							| 'project.delete'
@@ -5785,6 +5853,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -20884,6 +20953,21 @@ export interface operations {
 			query?: {
 				limit?: number;
 				cursor?: string;
+				/** @description Exact status, or active for queued, provisioning, and running. */
+				status?:
+					| 'queued'
+					| 'provisioning'
+					| 'running'
+					| 'succeeded'
+					| 'failed'
+					| 'timed_out'
+					| 'cancelled'
+					| 'skipped'
+					| 'active';
+				/** @description Exact triggering user ID. */
+				triggered_by?: string;
+				/** @description Filter to the authenticated user. Cannot be combined with triggered_by. */
+				triggered_by_me?: 'true';
 			};
 			header?: never;
 			path: {
@@ -21394,6 +21478,126 @@ export interface operations {
 				};
 				content: {
 					'text/plain': string;
+				};
+			};
+			/** @description Authentication required */
+			401: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Access forbidden */
+			403: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Not found */
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Request body too large */
+			413: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Validation error */
+			422: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Internal server error */
+			500: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Service unavailable */
+			503: {
+				headers: {
+					/** @description Seconds to wait before retrying. */
+					'Retry-After': string;
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+		};
+	};
+	'projects.runs.list': {
+		parameters: {
+			query?: {
+				limit?: number;
+				cursor?: string;
+				/** @description Exact status, or active for queued, provisioning, and running. */
+				status?:
+					| 'queued'
+					| 'provisioning'
+					| 'running'
+					| 'succeeded'
+					| 'failed'
+					| 'timed_out'
+					| 'cancelled'
+					| 'skipped'
+					| 'active';
+				/** @description Exact triggering user ID. */
+				triggered_by?: string;
+				/** @description Filter to the authenticated user. Cannot be combined with triggered_by. */
+				triggered_by_me?: 'true';
+				tag_key?: string;
+				tag_value?: string;
+			};
+			header?: never;
+			path: {
+				pid: string;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Authorized run history */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': {
+						/** @enum {boolean} */
+						success: true;
+						data: components['schemas']['ProjectRunPage'];
+					};
+				};
+			};
+			/** @description Bad request */
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
 				};
 			};
 			/** @description Authentication required */
@@ -25990,6 +26194,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -26140,6 +26345,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -26508,6 +26714,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -26546,6 +26753,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -26836,6 +27044,7 @@ export interface operations {
 													| 'audit.global.read'
 													| 'directory.search'
 													| 'app.read'
+													| 'job.trigger'
 													| 'project.read'
 													| 'project.update'
 													| 'project.delete'
@@ -26982,6 +27191,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'
@@ -27219,6 +27429,7 @@ export interface operations {
 									| 'audit.global.read'
 									| 'directory.search'
 									| 'app.read'
+									| 'job.trigger'
 									| 'project.read'
 									| 'project.update'
 									| 'project.delete'

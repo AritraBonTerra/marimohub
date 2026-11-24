@@ -15,6 +15,7 @@ import {
 	RUN_STATUSES,
 	RUN_TRIGGERS,
 	RunId,
+	RunTagsSchema,
 } from '@marimo-hub/core';
 import { ComputeResourcesResponseSchema, extensibleResponseEnum } from '../shared';
 
@@ -70,9 +71,25 @@ const TimeoutSchema = z.number().int().min(MIN_JOB_TIMEOUT_SECONDS).openapi({
 	example: 1800,
 });
 
+const ConsumerPolicyShape = {
+	consumer_execution: z
+		.boolean()
+		.optional()
+		.describe(
+			'Allow authorized consumers to trigger this job. Scoped credentials also need job.trigger and source access. Defaults to false.',
+		),
+	consumer_history: z
+		.enum(['private', 'shared'])
+		.optional()
+		.describe(
+			'Defaults to private (triggerer and editors). Shared exposes run identity, status, triggerer, timestamps, tags and completed parameters to other authorized app users and viewers. Active inputs and diagnostics remain private. Disabling sharing restricts future reads; viewed data cannot be recalled.',
+		),
+};
+
 export const CreateJobBody = z
 	.strictObject({
 		name: z.string().min(1).max(MAX_JOB_NAME_LENGTH).openapi({ example: 'Nightly refresh' }),
+		...ConsumerPolicyShape,
 		enabled: z.boolean().default(true),
 		/** Absent = manual-trigger only. */
 		schedule: JobScheduleSchema.optional(),
@@ -87,6 +104,7 @@ export const CreateJobBody = z
 export const UpdateJobBody = z
 	.strictObject({
 		name: z.string().min(1).max(MAX_JOB_NAME_LENGTH).optional(),
+		...ConsumerPolicyShape,
 		enabled: z.boolean().optional(),
 		// Inline (unnamed) shapes: a nullable `$ref` renders as an `allOf` the
 		// generated client cannot assign `null` to.
@@ -104,6 +122,11 @@ export const UpdateJobBody = z
 
 export const TriggerRunBody = z
 	.strictObject({
+		tags: RunTagsSchema.optional().openapi({
+			description:
+				'Immutable submission tags. Exact-match history filters use these values; tags never grant access.',
+			example: { app: 'calibration-runner', app_version: 'v3' },
+		}),
 		/** Overrides the job's stored parameters for this run only. */
 		parameters: JobParametersSchema.optional(),
 	})
@@ -115,6 +138,7 @@ export const JobResponseSchema = z
 		notebook_id: z.string(),
 		project_id: z.string(),
 		name: z.string(),
+		...ConsumerPolicyShape,
 		enabled: z.boolean(),
 		schedule: JobScheduleSchema.optional(),
 		parameters: JobParametersSchema.optional(),
@@ -132,6 +156,7 @@ const RunErrorSchema = z.object({ code: z.string(), message: z.string() });
 
 export const JobRunResponseSchema = z
 	.object({
+		tags: RunTagsSchema.optional(),
 		run_id: z.string().regex(RunId.regex),
 		job_id: z.string(),
 		notebook_id: z.string(),

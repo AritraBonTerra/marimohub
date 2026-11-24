@@ -21,6 +21,56 @@ UI, the Node maintenance scheduler or Cloudflare `scheduled()` handler, and the
 its entry points, and stored job definitions and run history are left untouched
 so the feature can be turned back on without loss.
 
+## App-consumer execution and history
+
+Editors configure two independent settings in **New job** or **Edit job**, or through the API:
+
+| Setting                                                    | Default | Effect                                                                                                                                              |
+| ---------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Allow app users to run this job** (`consumer_execution`) | Off     | Lets authorized app users start runs.                                                                                                               |
+| **Run history** (`consumer_history`)                       | Private | Limits history to the person who started the run and editors. Shared also exposes summaries and completed parameters to other authorized app users. |
+
+Disabling app execution does not change history sharing.
+
+Scoped credentials need `job.trigger` plus source access (`app.read` or `project.read`) to invoke an opted-in job.
+The `run` token preset includes `job.trigger`; the `read` preset does not.
+Existing `notebook.write` credentials retain editor execution without a separate read grant.
+Signed-in consumers still need current source access and the job's execution opt-in.
+
+Shared summaries include run/source identity, status, triggerer, timestamps, tags,
+and completed parameters. Active parameters, diagnostics, and rendered output stay
+restricted to the triggerer and editors. Raw logs remain editor-only.
+
+Every request checks current project and notebook access. Disabling sharing restricts
+future reads but cannot recall viewed data. Deleted sources are unavailable.
+Tags only filter history: matching tags never grant access or combine job policies.
+
+To reuse completed inputs, submit their parameters to the current job.
+The new run records the current caller and source version. It continues after the
+initiating visit closes. Applications own progress displays; external links grant no external access.
+
+## Triggering jobs from an app
+
+App code can run opted-in jobs as the signed-in visitor with the `marimohub.jobs` helper.
+It needs no API token. It works in published apps with proxy exposure and browser SSO or
+development sign-in, but not through public app links.
+
+```python
+from marimohub.jobs import Jobs
+
+jobs = Jobs()
+job_id = "job-7h2k9qm4xz7rp3w8"
+run = jobs.trigger(job_id, parameters={"value": "42"}, tags={"app": "demo"})
+active = jobs.list_active_runs(job_id)
+page = jobs.list_project_runs(tag_key="app", tag_value="demo", limit=20)
+```
+
+Create `Jobs()` inside each visitor's session. The job must have `consumer_execution` on.
+[Jobs from app code](https://github.com/marimo-team/marimohub/blob/main/development_docs/app-jobs.md)
+lists the methods and the credential rules.
+[`examples/app-jobs/`](https://github.com/marimo-team/marimohub/tree/main/examples/app-jobs) is a
+complete app.
+
 ## Create a schedule
 
 1. Open **Jobs & schedules** from the notebook’s actions menu.
@@ -121,27 +171,84 @@ usually has output showing where it stopped. The run's `error` carries a
 sanitized code (`NOTEBOOK_FAILED`, `RUN_TIMED_OUT`, …) — never provider
 messages or secrets. Editors can read the captured logs.
 
+Applications can read run status through the API and recover active runs after
+reconnecting. Closing a browser or app session does not cancel accepted runs.
+`queued` means waiting; no queue position or start-time estimate is available.
+
+## Queue admission and capacity
+
+`MARIMOHUB_JOBS_MAX_QUEUED_RUNS_PER_JOB` sets each job's manual admission
+threshold on Node: a positive integer, default 20. All API replicas must use
+the same value. Capabilities expose it as `jobs.max_queued_runs_per_job`.
+
+Admission counts all queued runs for the job, including schedules and retries.
+Scheduled fires and automatic retries can exceed the threshold. There is no
+project-wide queue limit. Lowering the threshold preserves accepted runs.
+
+Manual submissions to one job are serialized under a distributed job claim.
+A submission that waits more than about 5 seconds returns HTTP 503 `SERVICE_UNAVAILABLE`;
+retry it with the same `Idempotency-Key`. At the threshold,
+new submissions return HTTP 429 with `RESOURCE_EXHAUSTED`. An accepted request's
+`Idempotency-Key` still replays its original run.
+
+A caller without write access to the notebook can have at most 3 queued or running runs
+per job. The next submission returns HTTP 429 `RESOURCE_EXHAUSTED` until one of them
+finishes. This limit is fixed, so one app user cannot fill a job's queue.
+
+Separate deployment and project caps bound provisioning and running runs;
+accepted excess stays queued. Dispatch selects eligible runs oldest first and
+skips saturated projects, without reserving a share for each project.
+The `forbid` policy applies only to scheduled fires.
+
+### Node configuration for 100 runs
+
+Set these variables on every Node replica:
+
+```sh
+MARIMOHUB_JOBS=on
+MARIMOHUB_JOBS_MAX_QUEUED_RUNS_PER_JOB=100
+MARIMOHUB_JOBS_MAX_CONCURRENT_RUNS=100
+MARIMOHUB_JOBS_MAX_CONCURRENT_RUNS_PER_PROJECT=100
+```
+
+Use durable shared storage and enable `MARIMOHUB_RUN_MAINTENANCE=true` on the
+designated maintenance replica. Keep dispatch under the maintenance lease.
+
+Set `timeout_seconds: 14400` on jobs that need four hours. The default remains
+1800 seconds (30 minutes); 14400 is the ceiling. Timeouts start at dispatch,
+include provisioning, and exclude queue waiting.
+
+This configuration accepts 100 submissions to an empty job before a scheduler
+tick and lets one project use all execution capacity. For multiple projects,
+choose a lower project cap to leave capacity for others. See
+[Configuration](./configuration.md#jobs) for the defaults.
+
+Production capacity is unmeasured: automated tests use test doubles, and no staged
+compute load test was run. Size compute quotas, CPU, memory, and storage throughput
+for the intended notebooks before using this configuration in production.
+
 ## Who can do what
 
-| Action                               | `viewer` | `editor` | `manager` | `admin` |
-| ------------------------------------ | :------: | :------: | :-------: | :-----: |
-| See jobs and run history             |    x     |    x     |     x     |    x    |
-| Open a run's rendered output         |    x     |    x     |     x     |    x    |
-| Create, edit, enable, or delete jobs |          |    x     |     x     |    x    |
-| Run a job now or cancel a run        |          |    x     |     x     |    x    |
-| Read a run's stdout/stderr logs      |          |    x     |     x     |    x    |
+| Action                            | Consumers (`app-user`, `viewer`)  | `editor`, `manager`, `admin` |
+| --------------------------------- | --------------------------------- | ---------------------------- |
+| See job definitions               | Yes                               | Yes                          |
+| See run history                   | Own runs, or shared history       | Yes                          |
+| Open rendered output              | Own runs                          | Yes                          |
+| Create, configure, or delete jobs | No                                | Yes                          |
+| Trigger a run                     | With `consumer_execution` enabled | Yes                          |
+| Cancel a run or read raw logs     | No                                | Yes                          |
 
-Triggering a job starts a kernel, so it takes the same editor gate as starting
-a session. Run history and outputs follow the static-snapshot posture (viewers
-can see rendered documents); logs are editor-only because stdout can echo
-environment values and tracebacks.
+All access requires current project and notebook authorization.
+Raw logs can contain environment values and tracebacks.
 
 > **Security note.** A run executes the notebook's code with the project's
 > resolved [integration secrets](./integration-secrets.md) and federated
 > credentials injected — exactly what an app session carries — regardless of
 > who triggers it or when the schedule fires. The credentials are attributed to
 > the manual triggerer, or to the job's author for scheduled runs. Treat a job
-> definition as you would a shared app.
+> definition as you would a shared app. Treat run `parameters` from consumers as
+> untrusted input: a consumer can send them through the REST API and skip the app's
+> controls. Validate every parameter the notebook reads.
 
 ## Notifications
 
@@ -180,29 +287,15 @@ The CLI exposes the same operations under `jobs …`.
 
 ## Configuration
 
-| Variable                                         | Default | Meaning                                                               |
-| ------------------------------------------------ | ------- | --------------------------------------------------------------------- |
-| `MARIMOHUB_JOBS`                                 | `off`   | Turns the feature on (`on`) or off (`off`).                           |
-| `MARIMOHUB_JOBS_TICK_SECONDS`                    | `60`    | Node only: scheduler interval on the maintenance replica.             |
-| `MARIMOHUB_JOBS_MAX_CONCURRENT_RUNS`             | `5`     | Node only: deployment-wide cap on runs holding a sandbox.             |
-| `MARIMOHUB_JOBS_MAX_CONCURRENT_RUNS_PER_PROJECT` | `2`     | Node only: per-project share of the cap.                              |
-| `MARIMOHUB_JOBS_MAX_PER_NOTEBOOK`                | `5`     | Node only: job definitions per notebook (`0` = unlimited).            |
-| `MARIMOHUB_JOBS_DEFAULT_TIMEOUT_SECONDS`         | `1800`  | Node only: run deadline when the job sets none.                       |
-| `MARIMOHUB_JOBS_MAX_TIMEOUT_SECONDS`             | `14400` | Node only: ceiling on a job's `timeout_seconds`.                      |
-| `MARIMOHUB_JOBS_RUN_RETENTION_DAYS`              | `30`    | Node only: how long run records and outputs are kept.                 |
-| `MARIMOHUB_JOBS_CATCHUP_WINDOW_SECONDS`          | `600`   | Node only: how stale a missed occurrence may be and still fire, once. |
-
-On Node, the tuning variables apply only while `MARIMOHUB_JOBS=on`. Jobs grant
-editors nothing an edit session does not; unattended cost is bounded by the
-caps and timeouts, and a deployment can turn the feature off at any time.
+The `MARIMOHUB_JOBS_*` variables and their defaults are listed in
+[Configuration](./configuration.md#jobs). On Node, the tuning variables apply only while
+`MARIMOHUB_JOBS=on`. Jobs grant editors nothing an edit session does not; unattended cost is
+bounded by the caps and timeouts, and a deployment can turn the feature off at any time.
 
 ::: tip Cloudflare Workers
 The Workers reference deployment reads the same `MARIMOHUB_JOBS` toggle from
 its wrangler vars and ticks the scheduler from its five-minute cron trigger, so
 schedules finer than five minutes are Node-only, and a run is bounded by the
-Workers invocation limits. It ignores the tuning variables in the table and
-uses their listed defaults, except that tick cadence comes from the five-minute
-platform trigger.
+Workers invocation limits. It ignores the tuning variables and uses their
+defaults, except that tick cadence comes from the five-minute platform trigger.
 :::
-
-See [Configuration](./configuration.md) for the full reference.

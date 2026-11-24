@@ -79,6 +79,7 @@ components:
                 - SERVICE_UNAVAILABLE
                 - SESSION_PERSISTENCE_REQUIRED
                 - PYTHON_ENV_SETUP_FAILED
+                - RUNTIME_CAPTURE_SETUP_FAILED
                 - RESOURCE_EXHAUSTED
                 - SURFACE_NOT_ENABLED
                 - SURFACE_UNAVAILABLE
@@ -92,6 +93,7 @@ components:
                 - PAYLOAD_TOO_LARGE
                 - NO_HTML_SNAPSHOT
                 - NO_RUN_OUTPUT
+                - STREAM_EXPIRED
                 - INTERNAL_ERROR
             message:
               type: string
@@ -404,6 +406,8 @@ components:
                 - integer
                 - 'null'
               exclusiveMinimum: 0
+              description: Queued-run threshold for accepting new manual submissions.
+                Scheduled runs and retries may exceed this value.
             default_timeout_seconds:
               type:
                 - integer
@@ -2037,6 +2041,7 @@ components:
                   - audit.global.read
                   - directory.search
                   - app.read
+                  - job.trigger
                   - project.read
                   - project.update
                   - project.delete
@@ -2502,6 +2507,7 @@ components:
                           - audit.global.read
                           - directory.search
                           - app.read
+                          - job.trigger
                           - project.read
                           - project.update
                           - project.delete
@@ -2558,6 +2564,7 @@ components:
             - audit.global.read
             - directory.search
             - app.read
+            - job.trigger
             - project.read
             - project.update
             - project.delete
@@ -4615,6 +4622,20 @@ components:
           type: string
         name:
           type: string
+        consumer_execution:
+          type: boolean
+          description: Allow authorized consumers to trigger this job. Scoped credentials
+            also need job.trigger and source access. Defaults to false.
+        consumer_history:
+          type: string
+          enum:
+            - private
+            - shared
+          description: Defaults to private (triggerer and editors). Shared exposes run
+            identity, status, triggerer, timestamps, tags and completed
+            parameters to other authorized app users and viewers. Active inputs
+            and diagnostics remain private. Disabling sharing restricts future
+            reads; viewed data cannot be recalled.
         enabled:
           type: boolean
         schedule:
@@ -4726,6 +4747,20 @@ components:
           minLength: 1
           maxLength: 120
           example: Nightly refresh
+        consumer_execution:
+          type: boolean
+          description: Allow authorized consumers to trigger this job. Scoped credentials
+            also need job.trigger and source access. Defaults to false.
+        consumer_history:
+          type: string
+          enum:
+            - private
+            - shared
+          description: Defaults to private (triggerer and editors). Shared exposes run
+            identity, status, triggerer, timestamps, tags and completed
+            parameters to other authorized app users and viewers. Active inputs
+            and diagnostics remain private. Disabling sharing restricts future
+            reads; viewed data cannot be recalled.
         enabled:
           type: boolean
           default: true
@@ -4759,6 +4794,20 @@ components:
           type: string
           minLength: 1
           maxLength: 120
+        consumer_execution:
+          type: boolean
+          description: Allow authorized consumers to trigger this job. Scoped credentials
+            also need job.trigger and source access. Defaults to false.
+        consumer_history:
+          type: string
+          enum:
+            - private
+            - shared
+          description: Defaults to private (triggerer and editors). Shared exposes run
+            identity, status, triggerer, timestamps, tags and completed
+            parameters to other authorized app users and viewers. Active inputs
+            and diagnostics remain private. Disabling sharing restricts future
+            reads; viewed data cannot be recalled.
         enabled:
           type: boolean
         schedule:
@@ -4840,6 +4889,12 @@ components:
     JobRun:
       type: object
       properties:
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 256
+          maxProperties: 32
         run_id:
           type: string
           pattern: ^run_[0-9A-HJKMNP-TV-Z]{26}$
@@ -4959,10 +5014,35 @@ components:
     JobRunTriggerBody:
       type: object
       properties:
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 256
+          maxProperties: 32
+          description: Immutable submission tags. Exact-match history filters use these
+            values; tags never grant access.
+          example:
+            app: calibration-runner
+            app_version: v3
         parameters:
           $ref: '#/components/schemas/JobParameters'
       additionalProperties: false
     JobRunPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobRun'
+        next_cursor:
+          type:
+            - string
+            - 'null'
+      required:
+        - items
+        - next_cursor
+    ProjectRunPage:
       type: object
       properties:
         items:
@@ -5975,6 +6055,7 @@ components:
                       - audit.global.read
                       - directory.search
                       - app.read
+                      - job.trigger
                       - project.read
                       - project.update
                       - project.delete
@@ -6319,6 +6400,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -23673,6 +23755,10 @@ paths:
       tags:
         - Jobs
       summary: List a job’s runs
+      description: Runs are ordered by descending run ID. Project lists and filtered
+        job lists scan at most limit entries (maximum 500). Follow next_cursor
+        even on empty pages. Status and access are read live. Restart from the
+        first page to refresh active runs.
       parameters:
         - schema:
             type: string
@@ -23707,6 +23793,43 @@ paths:
             example: WyIyMDI1LTAzLTA1VDE0OjAwOjAwWiIsIm5iLTEiXQ
           required: false
           name: cursor
+          in: query
+        - schema:
+            type: string
+            enum:
+              - queued
+              - provisioning
+              - running
+              - succeeded
+              - failed
+              - timed_out
+              - cancelled
+              - skipped
+              - active
+            description: Exact status, or active for queued, provisioning, and running.
+          required: false
+          description: Exact status, or active for queued, provisioning, and running.
+          name: status
+          in: query
+        - schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+            description: Exact triggering user ID.
+          required: false
+          description: Exact triggering user ID.
+          name: triggered_by
+          in: query
+        - schema:
+            type: string
+            enum:
+              - 'true'
+            description: Filter to the authenticated user. Cannot be combined with
+              triggered_by.
+          required: false
+          description: Filter to the authenticated user. Cannot be combined with
+            triggered_by.
+          name: triggered_by_me
           in: query
       responses:
         '200':
@@ -24128,6 +24251,159 @@ paths:
             text/plain:
               schema:
                 type: string
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{pid}/runs:
+    get:
+      operationId: projects.runs.list
+      tags:
+        - Jobs
+      summary: List project runs by status, triggering user, or submission tag
+      description: Runs are ordered by descending run ID. Project lists and filtered
+        job lists scan at most limit entries (maximum 500). Follow next_cursor
+        even on empty pages. Status and access are read live. Restart from the
+        first page to refresh active runs.
+      parameters:
+        - schema:
+            type: string
+            pattern: ^proj-[0-9a-z]{16}$
+            example: proj-7h2k9qm4xz7rp3w8
+          required: true
+          name: pid
+          in: path
+        - schema:
+            type: integer
+            exclusiveMinimum: 0
+            example: 100
+          required: false
+          name: limit
+          in: query
+        - schema:
+            type: string
+            example: WyIyMDI1LTAzLTA1VDE0OjAwOjAwWiIsIm5iLTEiXQ
+          required: false
+          name: cursor
+          in: query
+        - schema:
+            type: string
+            enum:
+              - queued
+              - provisioning
+              - running
+              - succeeded
+              - failed
+              - timed_out
+              - cancelled
+              - skipped
+              - active
+            description: Exact status, or active for queued, provisioning, and running.
+          required: false
+          description: Exact status, or active for queued, provisioning, and running.
+          name: status
+          in: query
+        - schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+            description: Exact triggering user ID.
+          required: false
+          description: Exact triggering user ID.
+          name: triggered_by
+          in: query
+        - schema:
+            type: string
+            enum:
+              - 'true'
+            description: Filter to the authenticated user. Cannot be combined with
+              triggered_by.
+          required: false
+          description: Filter to the authenticated user. Cannot be combined with
+            triggered_by.
+          name: triggered_by_me
+          in: query
+        - schema:
+            type: string
+            pattern: ^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$
+          required: false
+          name: tag_key
+          in: query
+        - schema:
+            type: string
+            maxLength: 256
+          required: false
+          name: tag_value
+          in: query
+      responses:
+        '200':
+          description: Authorized run history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/ProjectRunPage'
+                required:
+                  - success
+                  - data
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '401':
           description: Authentication required
           content:
@@ -29237,6 +29513,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -29412,6 +29689,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -29813,6 +30091,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -29873,6 +30152,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -30210,6 +30490,7 @@ paths:
                                         - audit.global.read
                                         - directory.search
                                         - app.read
+                                        - job.trigger
                                         - project.read
                                         - project.update
                                         - project.delete
@@ -30379,6 +30660,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
@@ -30647,6 +30929,7 @@ paths:
                               - audit.global.read
                               - directory.search
                               - app.read
+                              - job.trigger
                               - project.read
                               - project.update
                               - project.delete
