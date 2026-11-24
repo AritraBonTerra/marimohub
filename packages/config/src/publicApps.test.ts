@@ -32,7 +32,7 @@ describe('parsePublicAppsConfig', () => {
 		expect(cfg!.poolPolicy.maxSessionsPerVersion).toBe(2);
 		expect(cfg!.poolPolicy.maxVisitsPerSession).toBe(25);
 		expect(cfg!.idleTimeoutMs).toBe(300_000);
-		expect(cfg!.maxLifetimeMs).toBe(3_600_000);
+		expect(cfg!.maxLifetimeMs).toBe(1_800_000);
 		expect(cfg!.visitTokenTtlSeconds).toBe(600);
 	});
 
@@ -43,7 +43,7 @@ describe('parsePublicAppsConfig', () => {
 				MARIMOHUB_PUBLIC_APPS_ALLOW_INTEGRATIONS: 'on',
 				MARIMOHUB_PUBLIC_APPS_SECRET: SECRET,
 			},
-			{ authBackend: 'oidc', exposureMode: 'proxy' },
+			{ authBackend: 'oidc', exposureMode: 'subdomain' },
 		);
 		expect(cfg?.allowProjectIntegrations).toBe(true);
 	});
@@ -67,8 +67,9 @@ describe('parsePublicAppsConfig', () => {
 		).toThrow(ConfigError);
 	});
 
-	it('refuses proxy-header and cloudflare-access in proxy mode and requires ack in subdomain mode', () => {
-		for (const authBackend of ['proxy-header', 'cloudflare-access']) {
+	it('refuses proxy exposure with public links on and allows it with them off', () => {
+		for (const authBackend of ['oidc', 'proxy-header', 'cloudflare-access']) {
+			const context = { authBackend, exposureMode: 'proxy' } as const;
 			expect(() =>
 				parsePublicAppsConfig(
 					{
@@ -76,10 +77,15 @@ describe('parsePublicAppsConfig', () => {
 						MARIMOHUB_PUBLIC_APPS_SECRET: SECRET,
 						MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK: 'true',
 					},
-					{ authBackend, exposureMode: 'proxy' },
+					context,
 				),
-			).toThrow(ConfigError);
+			).toThrow(/MARIMOHUB_SANDBOX_EXPOSURE=proxy/);
+			expect(parsePublicAppsConfig({ MARIMOHUB_PUBLIC_APP_LINKS: 'off' }, context)).toBeUndefined();
+		}
+	});
 
+	it('requires the edge bypass acknowledgement with ingress auth', () => {
+		for (const authBackend of ['proxy-header', 'cloudflare-access']) {
 			expect(() =>
 				parsePublicAppsConfig(
 					{

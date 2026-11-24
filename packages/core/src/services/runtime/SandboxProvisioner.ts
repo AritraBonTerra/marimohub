@@ -243,6 +243,8 @@ export type BootOptions = Pick<
 	| 'resources'
 	| 'userHome'
 	| 'sessionIdleTimeoutMs'
+	| 'maxLifetimeMs'
+	| 'deploymentSecrets'
 	| 'restoreFilesystemSnapshotId'
 >;
 
@@ -329,6 +331,10 @@ export interface ProvisionOptions {
 	userId?: UserId;
 	/** Control-plane idle deadline used by providers to derive an orphan backstop. */
 	sessionIdleTimeoutMs?: Millis;
+	/** Provider-enforced sandbox lifetime. See `CreateSandboxOptions.maxLifetimeMs`. */
+	maxLifetimeMs?: Millis;
+	/** False withholds deployment-wide provider secrets. See `CreateSandboxOptions.deploymentSecrets`. */
+	deploymentSecrets?: boolean;
 	/**
 	 * Environment variables and files to inject before dependency setup. Never logged.
 	 * Promises let credential resolution overlap sandbox boot. The caller resolves credentials.
@@ -924,6 +930,8 @@ export class SandboxProvisioner {
 				resources: options.resources,
 				userHome: options.userHome,
 				sessionIdleTimeoutMs: options.sessionIdleTimeoutMs,
+				maxLifetimeMs: options.maxLifetimeMs,
+				deploymentSecrets: options.deploymentSecrets,
 				owner: {
 					projectId: options.projectId,
 					...(options.userId ? { userId: options.userId } : {}),

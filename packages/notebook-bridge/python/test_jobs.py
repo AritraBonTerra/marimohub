@@ -173,6 +173,13 @@ class JobsTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "hosted app"):
                     Jobs()
 
+    def test_public_sandboxes_ignore_job_headers(self):
+        with patch.dict("os.environ", {"MARIMOHUB_APP_JOBS": "off"}):
+            with patch("jobs.build_opener") as opener:
+                with self.assertRaisesRegex(RuntimeError, "public apps"):
+                    visitor("forged", "https://evil.test")
+            opener.assert_not_called()
+
     def test_requires_a_hosted_visitor(self):
         for request in [None, SimpleNamespace(headers={})]:
             with self.assertRaises(RuntimeError):

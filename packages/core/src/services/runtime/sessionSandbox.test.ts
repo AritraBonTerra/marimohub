@@ -38,6 +38,16 @@ describe('sessionSandbox', () => {
 		},
 	);
 
+	it('attaches to a public sandbox without creating a replacement', () => {
+		const { instance, provider, create, connect, session } = setup();
+		expect(sessionSandbox(provider, { ...session, audience: 'public' })).toBe(instance);
+		expect(connect).toHaveBeenCalledOnce();
+		expect(create).not.toHaveBeenCalled();
+
+		expect(sessionSandbox(provider, session)).toBe(instance);
+		expect(create).toHaveBeenCalledOnce();
+	});
+
 	it('rejects a session without a sandbox before contacting the provider', () => {
 		const { provider, create, connect, session } = setup();
 		expect(() => sessionSandbox(provider, { ...session, sandbox_id: undefined })).toThrow(

@@ -111,6 +111,11 @@ function isPositiveUint32(value: number | undefined): boolean {
 	return value !== undefined && Number.isInteger(value) && value > 0 && value <= 0xffff_ffff;
 }
 
+/** Modal requires whole seconds and allows at most 24 hours. */
+function sandboxLifetimeMs(maxLifetimeMs = MAX_SANDBOX_LIFETIME_MS): number {
+	return Math.min(Math.ceil(maxLifetimeMs / 1000) * 1000, MAX_SANDBOX_LIFETIME_MS);
+}
+
 export function modalProfileResources(resources: ComputeResources | undefined): {
 	cpu?: number;
 	memoryMiB?: number;
@@ -223,6 +228,7 @@ class ModalSandboxInstance implements SandboxInstance {
 		private readonly resources: ReturnType<typeof modalProfileResources>,
 		private readonly reuse: boolean,
 		private readonly existingOnly = false,
+		private readonly lifetimeMs = MAX_SANDBOX_LIFETIME_MS,
 	) {}
 
 	private async createSandbox(): Promise<Sandbox> {
@@ -259,7 +265,7 @@ class ModalSandboxInstance implements SandboxInstance {
 				[SANDBOX_ID_TAG]: this.id,
 			},
 			encryptedPorts: [KERNEL_PORT],
-			timeoutMs: MAX_SANDBOX_LIFETIME_MS,
+			timeoutMs: this.lifetimeMs,
 			...(this.config.idleFallbackMs !== undefined
 				? { idleTimeoutMs: this.config.idleFallbackMs }
 				: {}),
@@ -720,6 +726,7 @@ export class ModalCompute implements SandboxProvider {
 			...(options?.sessionIdleTimeoutMs !== undefined
 				? { idleFallbackMs: Math.ceil(options.sessionIdleTimeoutMs * 1.5) }
 				: {}),
+			...(options?.deploymentSecrets === false ? { secretNames: [] } : {}),
 		};
 		return new ModalSandboxInstance(
 			id,
@@ -727,6 +734,8 @@ export class ModalCompute implements SandboxProvider {
 			this.client,
 			modalProfileResources(options?.resources),
 			options?.reuse ?? true,
+			false,
+			sandboxLifetimeMs(options?.maxLifetimeMs),
 		);
 	}
 

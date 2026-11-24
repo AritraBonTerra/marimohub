@@ -7,7 +7,6 @@ import { all, allSettled } from 'better-all';
 import type {
 	AppPoolNamespace,
 	KnownObject,
-	Millis,
 	ProvisionResult,
 	SecondarySurfaceId,
 	WarmPoolClaim,
@@ -32,6 +31,7 @@ import type {
 } from '@marimo-hub/core';
 import { SANDBOX_STARTUP_PHASES, STARTUP_DETAIL_MAX_LENGTH } from '@marimo-hub/core/constants';
 import {
+	Millis,
 	EditorClaimLostError,
 	admissionCaps,
 	assertAdmissionRank,
@@ -1476,6 +1476,9 @@ export type SessionCreateResult = z.infer<typeof SessionCreateResponseSchema>;
 
 const EDITOR_STOP_WAIT_MS = 10_000;
 
+/** Lets the hub retire a public sandbox before the provider stops it. */
+const PUBLIC_SANDBOX_GRACE_MS = Millis.minutes(2);
+
 export interface PublicSessionAccess {
 	slug: string;
 	registrationId: string;
@@ -1897,7 +1900,7 @@ async function startNotebookSessionOnce(
 				})
 			: Promise.resolve(undefined);
 	const readRestoreSnapshot = () =>
-		!ephemeral && workspacePolicy.restoreFilesystemSnapshot
+		!publicAccess && !ephemeral && workspacePolicy.restoreFilesystemSnapshot
 			? resolveRestoreSnapshot(compute, notebooks, pid, nid, {
 					sharing: mode === 'edit' ? sharing : 'shared',
 					userId: user.id,
@@ -2435,9 +2438,14 @@ async function startNotebookSessionOnce(
 				wifVars: resolveWifVars,
 				marimoEnv: resolveMarimoConfigEnv,
 				integrationEnv: resolveIntegrationEnv,
-			}).then((layers) =>
-				composeSessionEnv({ ...layers, endpointDelivery: credentialsEndpoint !== undefined }),
-			);
+			}).then((layers) => {
+				const env = composeSessionEnv({
+					...layers,
+					endpointDelivery: credentialsEndpoint !== undefined,
+				});
+				// Visitors reach subdomain kernels directly, so the hub cannot strip forged job headers.
+				return publicAccess ? mergeSessionEnv(env, { vars: { MARIMOHUB_APP_JOBS: 'off' } }) : env;
+			});
 			const gitIdentity =
 				mode === 'edit' && sandbox.gitIdentity === 'user'
 					? deps.services.identities.get(user.id).then((identity) => {
@@ -2511,6 +2519,12 @@ async function startNotebookSessionOnce(
 				: isPreview
 					? (previewIdleTimeout(sandbox.sessionLifetime?.idleTimeoutMsByMode[mode]) as Millis)
 					: sandbox.sessionLifetime?.idleTimeoutMsByMode[mode],
+			...(publicAccess
+				? {
+						maxLifetimeMs: Millis.of(publicAccess.config.maxLifetimeMs + PUBLIC_SANDBOX_GRACE_MS),
+						deploymentSecrets: false,
+					}
+				: {}),
 			sessionEnv: envResolution!.sessionEnv,
 			gitIdentity: envResolution!.gitIdentity,
 			entryNotebook: workspacePolicy.entryNotebook,
