@@ -1,3 +1,4 @@
+import { appJobsEndpoint } from './jobs/appJobsEndpoint';
 import { deploymentState, withRequestMemo } from './requestMemo';
 /**
  * HTTP and WebSocket proxies share admission checks. Each request keeps its own
@@ -6,6 +7,8 @@ import { deploymentState, withRequestMemo } from './requestMemo';
 import type { MiddlewareHandler } from 'hono';
 import {
 	AppPoolService,
+	APP_JOB_CREDENTIAL_REFRESH_WINDOW_MS,
+	signAppJobCredential,
 	isPastAuthorizationDeadline,
 	isPublicDeepLink,
 	LazyMap,
@@ -56,6 +59,8 @@ export type ProxyDecision =
 			sessionId: string;
 			projectId?: ProjectId;
 			kernelAuthToken?: string;
+			appJobCredential?: string;
+			appJobsEndpoint?: string;
 			authorizationDeadline?: number;
 	  };
 
@@ -64,6 +69,7 @@ type Admission = Omit<Extract<ProxyDecision, { kind: 'forward' }>, 'targetUrl'> 
 	originUrl: string;
 	proxyPath: 'strip-prefix' | 'preserve-prefix';
 	cacheable: boolean;
+	assignmentGenerations?: string[];
 };
 type CachedAdmission = { admission: Admission; expiresAt: number };
 type AdmissionCache = LazyMap<string, CachedAdmission>;
@@ -253,6 +259,7 @@ async function authorizePublicProxyRequest(
 export async function authorizeProxyRequest(
 	request: Request,
 	rawDeps: ApiDeps,
+	issueJobCredential = true,
 ): Promise<ProxyDecision> {
 	const url = new URL(request.url);
 	const kernelMatch = PROXY_PREFIX.exec(url.pathname);
@@ -369,13 +376,40 @@ export async function authorizeProxyRequest(
 		cache.delete(key);
 		return rejectProxy(410, 'GONE', 'Session authorization has expired');
 	}
-	const { originUrl, proxyPath, cacheable, ...forward } = admission;
+	const { originUrl, proxyPath, cacheable, assignmentGenerations, ...forward } = admission;
 	if (!cacheable) cache.delete(key);
 	const upstreamPath =
 		surfaceMatch && proxyPath === 'strip-prefix'
 			? url.pathname.slice(surfaceMatch[0].length) || '/'
 			: url.pathname;
-	return { ...forward, targetUrl: `${trimTrailingSlash(originUrl)}${upstreamPath}${url.search}` };
+	let appJobAccess = {};
+	if (
+		issueJobCredential &&
+		assignmentGenerations?.length &&
+		!surfaceMatch &&
+		deps.jobs &&
+		['sso', 'development'].includes(user.credential.kind)
+	) {
+		const endpoint = appJobsEndpoint(deps, request);
+		const refreshUntil = Math.min(
+			Date.now() + APP_JOB_CREDENTIAL_REFRESH_WINDOW_MS,
+			...[user.credential.expiresAt, user.entitlementsExpiresAt]
+				.filter((v): v is string => !!v)
+				.map(Date.parse),
+		);
+		appJobAccess = {
+			appJobsEndpoint: endpoint,
+			appJobCredential: await signAppJobCredential(
+				{ principal: user, routingToken: token, assignmentGenerations, endpoint, refreshUntil },
+				secret,
+			),
+		};
+	}
+	return {
+		...forward,
+		...appJobAccess,
+		targetUrl: `${trimTrailingSlash(originUrl)}${upstreamPath}${url.search}`,
+	};
 }
 
 async function loadAdmission(
@@ -473,14 +507,18 @@ async function loadAdmission(
 		);
 	}
 
+	let assignmentGenerations: string[] | undefined;
 	if (sessionMode(session) === 'app') {
 		try {
-			const allowed = await new AppPoolService(
+			const view = await new AppPoolService(
 				deps.bucket,
 				deps.services.sessions,
 				deps.policy.appPool,
 				deps.metrics,
-			).canAccess(projectId, session.notebook_id, user.id, sessionId, !session.app_pool);
+			).view(projectId, session.notebook_id);
+			const allowed = view.canAccess(user.id, sessionId, !session.app_pool);
+			if (!session.preview)
+				assignmentGenerations = view.activeAssignmentGenerations(user.id, sessionId);
 			if (!allowed) {
 				return rejectProxy(410, 'GONE', 'The app assignment expired. Open the app again.');
 			}
@@ -508,6 +546,7 @@ async function loadAdmission(
 		kind: 'forward',
 		originUrl,
 		proxyPath,
+		assignmentGenerations,
 		cacheable: sessionMode(session) !== 'app' && session.origin?.type !== 'preview',
 		sessionId,
 		projectId: session.project_id,
@@ -534,10 +573,13 @@ const HOP_BY_HOP = new Set([
 /**
  * Notebook code can read request headers. HTTP and WebSocket proxies strip hub
  * credentials, including Access assertions, service tokens, and cookies.
- * Only the session's kernel token reaches the notebook.
+ * Only the session's kernel token reaches the notebook, plus, for app sessions, the
+ * endpoint-bound app-jobs credential that `/api/app-jobs/v1` alone accepts.
  */
 export const CREDENTIAL_HEADERS = new Set([
 	'cookie',
+	'x-mhub-app-jobs-credential',
+	'x-mhub-app-jobs-url',
 	'authorization',
 	'x-goog-iap-jwt-assertion',
 	'x-forwarded-email',
@@ -604,12 +646,17 @@ export async function forwardHttp(
 	sessionId?: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
+	appJobs?: { appJobCredential?: string; appJobsEndpoint?: string },
 ): Promise<Response> {
 	const init: RequestInit = {
 		method: request.method,
 		headers: requestHeaders(request, targetUrl, kernelAuthToken, credentialHeaders),
 		redirect: 'manual',
 	};
+	if (appJobs?.appJobCredential && appJobs.appJobsEndpoint) {
+		(init.headers as Headers).set('x-mhub-app-jobs-credential', appJobs.appJobCredential);
+		(init.headers as Headers).set('x-mhub-app-jobs-url', appJobs.appJobsEndpoint);
+	}
 	const retryable = request.method === 'GET' || request.method === 'HEAD';
 	if (!retryable) {
 		init.body = request.body;
@@ -669,8 +716,20 @@ export async function forwardHttp(
 	});
 }
 
-/** Mount before API and SPA routes so proxy requests cannot fall through to them. */
-const pendingSaveCaptures = deploymentState(() => new Map<string, { again?: string }>());
+const MAX_PENDING_SAVE_CAPTURES = 64;
+const MAX_SAVE_CAPTURE_ATTEMPTS = 4;
+const SAVE_CAPTURE_RETRY_MS = 100;
+
+const pendingSaveCaptures = deploymentState(() => new Map<string, { again: boolean }>());
+
+/** Native editor saves, including runtimes mounted under a base URL. */
+export function isRuntimeSaveRequest(request: Request, targetUrl: string): boolean {
+	if (request.method !== 'POST') return false;
+	const path = new URL(targetUrl).pathname;
+	return (
+		path.endsWith('/api/kernel/save') || /\/api\/marimo\/v1\/notebooks\/[^/]+\/save$/.test(path)
+	);
+}
 
 export async function observeRuntimeSave(
 	deps: ApiDeps,
@@ -678,12 +737,7 @@ export async function observeRuntimeSave(
 	response: Response,
 	decision: Extract<ProxyDecision, { kind: 'forward' }>,
 ): Promise<void> {
-	if (
-		request.method !== 'POST' ||
-		!response.ok ||
-		!decision.projectId ||
-		!new URL(decision.targetUrl).pathname.endsWith('/api/kernel/save')
-	)
+	if (!response.ok || !decision.projectId || !isRuntimeSaveRequest(request, decision.targetUrl))
 		return;
 	const metric = (name: string) => {
 		try {
@@ -692,58 +746,105 @@ export async function observeRuntimeSave(
 	};
 	const acknowledgedAt = new Date().toISOString();
 	metric('sessions.save.acknowledged');
-	if (!deps.backgroundWork) return;
+	const sessionId = SessionId.parse(decision.sessionId);
+	const projectId = decision.projectId;
+	const { sessions, notebooks } = deps.services;
+	const reportFailure = (phase: 'intent' | 'schedule' | 'capture', error: unknown) => {
+		metric('sessions.save.hint_failed');
+		logEvent({
+			level: phase === 'intent' ? 'error' : 'warn',
+			event: `session_save_${phase}_failed`,
+			session_id: sessionId,
+			error: errorMetadataChain(error),
+		});
+	};
+	try {
+		// Persist before admission so a full worker pool or process exit cannot lose intent.
+		await sessions.acknowledgeRuntimeSave(projectId, sessionId, acknowledgedAt);
+	} catch (error) {
+		reportFailure('intent', error);
+		return;
+	}
+	const backgroundWork = deps.backgroundWork;
+	if (!backgroundWork) return;
 	const pending = pendingSaveCaptures(deps);
 	const existing = pending.get(decision.sessionId);
 	if (existing) {
-		existing.again = acknowledgedAt;
+		existing.again = true;
 		return;
 	}
-	if (pending.size >= 64) return;
-	const queued: { again?: string } = {};
-	pending.set(decision.sessionId, queued);
-	try {
-		void Promise.resolve(
-			deps.backgroundWork.defer('session.save_capture', async () => {
-				try {
-					const current = await deps.services.sessions.acknowledgeRuntimeSave(
-						decision.projectId!,
-						SessionId.parse(decision.sessionId),
-						acknowledgedAt,
-					);
-					if (!current.save_dirty || current.status !== 'running' || !sessionPersistsEdits(current))
-						return;
-					const sandbox = reconnectSessionSandbox(deps.compute, current, deps.metrics, 'poll');
-					if (sandbox)
-						await new SessionCaptureCoordinator({
-							compute: deps.compute,
-							bucket: deps.bucket,
-							notebooks: deps.services.notebooks,
-							sessions: deps.services.sessions,
-							persistWorkspace: deps.sandbox.persistWorkspace,
-							workdir: deps.sandbox.workdir,
-							metrics: deps.metrics,
-						}).capture(current, sandbox, { includeWorkspace: false });
-					if (queued.again)
-						await deps.services.sessions.acknowledgeRuntimeSave(
-							current.project_id,
-							current.session_id,
-							queued.again,
-						);
-				} catch {
-					metric('sessions.save.hint_failed');
-				} finally {
-					pending.delete(decision.sessionId);
-				}
-			}),
-		).catch(() => {
-			pending.delete(decision.sessionId);
-			metric('sessions.save.hint_failed');
-		});
-	} catch {
-		pending.delete(decision.sessionId);
-		metric('sessions.save.hint_failed');
+	if (pending.size >= MAX_PENDING_SAVE_CAPTURES) {
+		metric('sessions.save.capture_deferred');
+		return;
 	}
+	const queued = { again: false };
+	pending.set(decision.sessionId, queued);
+	let attempts = 0;
+	let failures = 0;
+	const release = () => {
+		if (pending.get(decision.sessionId) === queued) pending.delete(decision.sessionId);
+	};
+	const schedulingFailed = (error: unknown) => {
+		release();
+		reportFailure('schedule', error);
+	};
+	const getSession = () => sessions.getSession(projectId, sessionId);
+	const coordinator = new SessionCaptureCoordinator({
+		compute: deps.compute,
+		bucket: deps.bucket,
+		notebooks,
+		sessions,
+		persistWorkspace: deps.sandbox.persistWorkspace,
+		workdir: deps.sandbox.workdir,
+		metrics: deps.metrics,
+	});
+	const captureNext = async (): Promise<boolean> => {
+		queued.again = false;
+		const current = await getSession();
+		if (!current.save_dirty || current.status !== 'running' || !sessionPersistsEdits(current))
+			return false;
+		const sandbox = reconnectSessionSandbox(deps.compute, current, deps.metrics, 'poll');
+		if (!sandbox) return false;
+		const { critical } = await coordinator.capture(current, sandbox, { includeWorkspace: false });
+		if (critical.status === 'failed' || critical.status === 'uncertain') {
+			failures++;
+			return critical.retryable;
+		}
+		if (critical.status !== 'durable') return false;
+		failures = 0;
+		const latest = await getSession();
+		return latest.status === 'running' && !!latest.save_dirty;
+	};
+	const schedule = (delay = 0) => {
+		try {
+			void Promise.resolve(
+				backgroundWork.defer('session.save_capture', async () => {
+					let followUp = false;
+					try {
+						if (delay)
+							await new Promise((resolve) => {
+								setTimeout(resolve, delay);
+							});
+						attempts++;
+						followUp = await captureNext();
+					} catch (error) {
+						reportFailure('capture', error);
+						failures++;
+						followUp = true;
+					}
+					// Requeue to share worker capacity. The lifecycle sweep retries exhausted bursts.
+					if (attempts < MAX_SAVE_CAPTURE_ATTEMPTS && (followUp || queued.again)) {
+						schedule(failures ? SAVE_CAPTURE_RETRY_MS * 2 ** (failures - 1) : 0);
+					} else {
+						release();
+					}
+				}),
+			).catch(schedulingFailed);
+		} catch (error) {
+			schedulingFailed(error);
+		}
+	};
+	schedule();
 }
 
 export function sandboxProxyMiddleware(deps: ApiDeps): MiddlewareHandler<HonoEnv> {
@@ -760,6 +861,7 @@ export function sandboxProxyMiddleware(deps: ApiDeps): MiddlewareHandler<HonoEnv
 			decision.sessionId,
 			decision.kernelAuthToken,
 			deps.sandbox.credentialHeaders,
+			decision,
 		);
 		await observeRuntimeSave(deps, c.req.raw, response, decision);
 		return response;

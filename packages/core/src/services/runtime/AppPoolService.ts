@@ -443,6 +443,15 @@ export class AppPoolService {
 		);
 		return {
 			members,
+			activeAssignmentGenerations: (userId: UserId, sessionId: SessionId) =>
+				pool?.assignments
+					.filter(
+						(item) =>
+							item.user_id === userId &&
+							item.session_id === sessionId &&
+							item.visits.some((visit) => visit.expires_at > this.now()),
+					)
+					.map((item) => item.generation) ?? [],
 			canAccess: (userId: UserId, sessionId: SessionId, legacy = false) => {
 				const allowLegacy = this.namespace === 'authenticated' && legacy;
 				return pool

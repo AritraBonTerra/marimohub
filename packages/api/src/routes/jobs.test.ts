@@ -52,9 +52,230 @@ describe('Job routes', () => {
 		}).request;
 	});
 
+	const withLimit = (maxQueuedRunsPerJob?: number) =>
+		createTestApi({
+			bucket,
+			compute,
+			deps: { jobs: { ...DEFAULT_JOBS_CONFIG, maxQueuedRunsPerJob } },
+		}).request;
+
 	const base = (notebookId = nid) => `/projects/${pid}/notebooks/${notebookId}/jobs`;
 	const createJob = async (body: Record<string, unknown> = { name: 'nightly' }, who = request) =>
 		expectOk<any>(await who('POST', base(), body), 201);
+
+	it('isolates consumer submissions and applies current sharing and execution policies', async () => {
+		const other = uid('viewer-2');
+		await services.projects.addMember(pid, { user_id: other }, 'app-user', ACTOR);
+		const first = as(VIEWER);
+		const second = as(other);
+		const job = await createJob({ name: 'consumer', consumer_execution: true });
+		const url = `${base()}/${job.id}`;
+		const body = { parameters: { value: '42' }, tags: { app: 'someone-elses-app' } };
+		const headers = { 'Idempotency-Key': 'same-key' };
+		const a = await expectOk<any>(await first('POST', `${url}/runs`, body, headers), 201);
+		const b = await expectOk<any>(await second('POST', `${url}/runs`, body, headers), 201);
+		expect(a.triggered_by).toBe(VIEWER);
+		expect(b.triggered_by).toBe(other);
+		expect(a.run_id).not.toBe(b.run_id);
+		expect(
+			(await expectOk<any>(await first('POST', `${url}/runs`, body, headers), 201)).run_id,
+		).toBe(a.run_id);
+		await expectError(await second('GET', `${url}/runs/${a.run_id}`), 404);
+		expect(await expectPage(await second('GET', `${url}/runs`))).toHaveLength(1);
+		expect(
+			await expectPage(
+				await second('GET', `/projects/${pid}/runs?tag_key=app&tag_value=someone-elses-app`),
+			),
+		).toHaveLength(1);
+		await expectOk(await as(EDITOR)('GET', `${url}/runs/${a.run_id}`));
+		await expectError(await second('PATCH', url, { consumer_history: 'shared' }), 403);
+		await expectError(await second('DELETE', url, undefined, { 'if-match': job.updated_at }), 403);
+		await expectOk(await request('PATCH', url, { consumer_history: 'shared' }));
+		const shared = await expectOk<any>(await second('GET', `${url}/runs/${a.run_id}`));
+		expect(shared.parameters).toBeUndefined();
+		expect((await expectOk<any>(await first('GET', `${url}/runs/${a.run_id}`))).parameters).toEqual(
+			body.parameters,
+		);
+		const stored = await services.jobRuns.getRun(pid, nid as never, job.id, a.run_id);
+		await services.jobRuns.transition(stored, 'fail', () => ({
+			error: { code: 'FAILED', message: 'Owner diagnostic' },
+		}));
+		expect(
+			(await expectOk<any>(await second('GET', `${url}/runs/${a.run_id}`))).error,
+		).toBeUndefined();
+		expect(
+			(await expectOk<any>(await first('GET', `${url}/runs/${a.run_id}`))).error?.message,
+		).toBe('Owner diagnostic');
+		const before = a.source_version_id;
+		await services.notebooks.updateNotebook(pid, nid as never, { code: 'new source' }, ACTOR);
+		const reused = await expectOk<any>(
+			await second('POST', `${url}/runs`, { parameters: body.parameters }),
+			201,
+		);
+		expect(reused.triggered_by).toBe(other);
+		expect(reused.source_version_id).not.toBe(before);
+
+		expect(
+			(await expectOk<any>(await second('GET', `${url}/runs/${a.run_id}`))).parameters,
+		).toEqual(body.parameters);
+		await expectError(await first('GET', `${url}/runs/${a.run_id}/logs`), 403);
+		await expectOk(
+			await request('PATCH', url, { consumer_history: 'private', consumer_execution: false }),
+		);
+		await expectError(await second('GET', `${url}/runs/${a.run_id}`), 404);
+		await expectError(await first('POST', `${url}/runs`, body, headers), 403);
+		await services.projects.removeMember(pid, VIEWER, ACTOR);
+		await expectError(await first('GET', `${url}/runs/${a.run_id}`), 404);
+	});
+
+	it.each([
+		[false, 'private'],
+		[false, 'shared'],
+		[true, 'private'],
+		[true, 'shared'],
+	] as const)('keeps execution=%s independent from history=%s', async (execution, history) => {
+		const job = await createJob({
+			name: 'policy',
+			consumer_execution: execution,
+			consumer_history: history,
+		});
+		const url = `${base()}/${job.id}`;
+		const run = await expectOk<any>(await request('POST', `${url}/runs`), 201);
+		const consumer = as(VIEWER);
+		const read = await consumer('GET', `${url}/runs/${run.run_id}`);
+		if (history === 'shared') await expectOk(read);
+		else await expectError(read, 404);
+		const trigger = await consumer('POST', `${url}/runs`);
+		if (execution) await expectOk(trigger, 201);
+		else await expectError(trigger, 403);
+	});
+
+	it('rejects forged identity and changed idempotent payloads without enqueueing extra runs', async () => {
+		const job = await createJob({ name: 'consumer', consumer_execution: true });
+		const url = `${base()}/${job.id}/runs`;
+		const consumer = as(VIEWER);
+		await expectError(await consumer('POST', url, { triggered_by: ACTOR }), 422);
+		const headers = { 'Idempotency-Key': 'consumer-request' };
+		await expectOk(await consumer('POST', url, { parameters: { x: '1' } }, headers), 201);
+		await expectError(await consumer('POST', url, { parameters: { x: '2' } }, headers), 422);
+		expect(await expectPage(await request('GET', url))).toHaveLength(1);
+		await services.projects.removeMember(pid, VIEWER, ACTOR);
+		await expectError(await consumer('POST', url, { parameters: { x: '1' } }, headers), 404);
+		expect(await expectPage(await request('GET', url))).toHaveLength(1);
+	});
+
+	it('does not let matching tags cross job policies or expose artifacts', async () => {
+		const allowed = await createJob({ name: 'allowed', consumer_execution: true });
+		const restricted = await createJob({ name: 'restricted' });
+		const consumer = as(VIEWER);
+		const body = { tags: { app: 'same-app' } };
+		const hidden = await expectOk<any>(
+			await request('POST', `${base()}/${restricted.id}/runs`, body),
+			201,
+		);
+		const own = await expectOk<any>(
+			await consumer('POST', `${base()}/${allowed.id}/runs`, body),
+			201,
+		);
+		await expectError(await consumer('POST', `${base()}/${restricted.id}/runs`, body), 403);
+		await expectError(
+			await consumer('GET', `${base()}/${restricted.id}/runs/${hidden.run_id}`),
+			404,
+		);
+		const results = await expectPage(
+			await consumer('GET', `/projects/${pid}/runs?tag_key=app&tag_value=same-app`),
+		);
+		expect(results.map((run) => run.run_id)).toEqual([own.run_id]);
+		const stored = await services.jobRuns.getRun(pid, nid as never, restricted.id, hidden.run_id);
+		await services.jobRuns.putOutputs(stored, {
+			html: '<p>private output</p>',
+			logs: 'private log',
+		});
+		await expectOk(
+			await request('PATCH', `${base()}/${restricted.id}`, { consumer_history: 'shared' }),
+		);
+		await expectOk(await consumer('GET', `${base()}/${restricted.id}/runs/${hidden.run_id}`));
+		await expectError(
+			await consumer('GET', `${base()}/${restricted.id}/runs/${hidden.run_id}/html`),
+			404,
+		);
+		await expectError(
+			await consumer('GET', `${base()}/${restricted.id}/runs/${hidden.run_id}/logs`),
+			403,
+		);
+		await expectError(
+			await consumer('POST', `${base()}/${allowed.id}/runs/${own.run_id}/cancel`),
+			403,
+		);
+	});
+
+	it.each([
+		{ consumer_execution: 'true' },
+		{ consumer_execution: null },
+		{ consumer_history: 'public' },
+		{ consumer_history: null },
+	])('rejects invalid consumer policy %j without changing the job', async (policy) => {
+		await expectError(await request('POST', base(), { name: 'invalid', ...policy }), 422);
+		expect(await expectPage(await request('GET', base()))).toEqual([]);
+		const job = await createJob();
+		expect(job).toMatchObject({ consumer_execution: false, consumer_history: 'private' });
+		await expectError(await request('PATCH', `${base()}/${job.id}`, policy), 422);
+		expect(await expectOk(await request('GET', `${base()}/${job.id}`))).toEqual(job);
+	});
+
+	it.each([
+		{ actions: ['project.read'], allowed: false },
+		{ actions: ['app.read'], allowed: false },
+		{ actions: ['project.read', 'job.trigger'], allowed: true },
+		{ actions: ['app.read', 'job.trigger'], allowed: true },
+		{ actions: ['notebook.write'], allowed: true },
+	] as const)('requires an execution grant for $actions', async ({ actions, allowed }) => {
+		const job = await createJob({ name: 'consumer', consumer_execution: true });
+		const scoped = (grants: typeof actions | readonly ['project.read']) =>
+			createTestApi({
+				bucket,
+				subject: {
+					credential: {
+						kind: 'personal-access-token',
+						id: 'scoped',
+						grant: { actions: [...grants], projects: [pid] },
+					},
+				},
+			}).request;
+		const url = `${base()}/${job.id}/runs`;
+		const headers = { 'Idempotency-Key': 'scoped-run' };
+		const response = await scoped(actions)('POST', url, {}, headers);
+		if (allowed) {
+			await expectOk(response, 201);
+			await expectError(await scoped(['project.read'])('POST', url, {}, headers), 403);
+		} else await expectError(response, 403);
+		expect(await expectPage(await request('GET', url))).toHaveLength(allowed ? 1 : 0);
+	});
+
+	it('does not let a job.trigger grant bypass source visibility or project scope', async () => {
+		const job = await createJob({ name: 'consumer', consumer_execution: true });
+		const other = await services.projects.createProject({ name: 'other', description: '' }, ACTOR);
+		for (const grant of [
+			{ actions: ['job.trigger'] as const, projects: [pid] },
+			{ actions: ['app.read', 'job.trigger'] as const, projects: [other.id] },
+		]) {
+			const scoped = createTestApi({
+				bucket,
+				subject: {
+					credential: {
+						kind: 'personal-access-token',
+						id: 'restricted',
+						grant: { ...grant, actions: [...grant.actions] },
+					},
+				},
+			}).request;
+			await expectError(
+				await scoped('POST', `${base()}/${job.id}/runs`),
+				grant.projects[0] === pid ? 403 : 404,
+			);
+		}
+		expect(await expectPage(await request('GET', `${base()}/${job.id}/runs`))).toEqual([]);
+	});
 
 	it('creates, lists, reads, updates, and deletes a job with an ETag', async () => {
 		const created = await createJob({
@@ -186,7 +407,7 @@ describe('Job routes', () => {
 	});
 
 	it('applies the role matrix: viewers read, editors mutate', async () => {
-		const job = await createJob();
+		const job = await createJob({ name: 'shared', consumer_history: 'shared' });
 		const viewer = as(VIEWER);
 		const editor = as(EDITOR);
 
@@ -207,7 +428,7 @@ describe('Job routes', () => {
 
 		const run = await expectOk<any>(await editor('POST', `${base()}/${job.id}/runs`), 201);
 		expect(run).toMatchObject({ status: 'queued', trigger: 'manual', triggered_by: EDITOR });
-		// Run history is viewer-visible; logs and cancel are editor-only.
+		// Sharing does not grant log access or cancellation.
 		expect(await expectPage(await viewer('GET', `${base()}/${job.id}/runs`))).toHaveLength(1);
 		await expectOk(await viewer('GET', `${base()}/${job.id}/runs/${run.run_id}`));
 		await expectError(
@@ -318,6 +539,23 @@ describe('Job routes', () => {
 		expect(await services.jobRuns.listActive()).toEqual([]);
 	});
 
+	it('deleting a job removes its runs from project history', async () => {
+		const job = await createJob();
+		const other = await createJob({ name: 'other' });
+		await expectOk(await request('POST', `${base()}/${job.id}/runs`), 201);
+		const kept = await expectOk<any>(await request('POST', `${base()}/${other.id}/runs`), 201);
+		await expectOk(
+			await request('DELETE', `${base()}/${job.id}`, undefined, {
+				'if-match': job.updated_at,
+			}),
+		);
+		const page = await services.jobRuns.listProjectRunsPage(pid, 10);
+		expect(page.items.map((run) => run.run_id)).toEqual([kept.run_id]);
+		expect((await bucket.list({ prefix: paths.project(pid).runIndexPrefix })).objects).toHaveLength(
+			1,
+		);
+	});
+
 	it('finishes deletion after repeated finish-audit failures', async () => {
 		const job = await createJob();
 		const queued = await expectOk<any>(await request('POST', `${base()}/${job.id}/runs`), 201);
@@ -400,7 +638,7 @@ describe('Job routes', () => {
 		expect(await html.text()).toBe('<html>out</html>');
 
 		const viewerHtml = await as(VIEWER)('GET', `${runPath}/html`);
-		expect(viewerHtml.status).toBe(200);
+		expect(viewerHtml.status).toBe(404);
 
 		const logs = await request('GET', `${runPath}/logs`);
 		expect(logs.status).toBe(200);
@@ -426,13 +664,18 @@ describe('Job routes', () => {
 		await expectError(await request('POST', `${base()}/${job.id}/runs`), 404, 'NOT_FOUND');
 	});
 
-	it('bounds how many manual runs may queue up', async () => {
-		const job = await createJob();
-		for (let i = 0; i < 20; i++) {
-			await expectOk(await request('POST', `${base()}/${job.id}/runs`), 201);
-		}
-		await expectError(await request('POST', `${base()}/${job.id}/runs`), 429, 'RESOURCE_EXHAUSTED');
-	});
+	it.each([20, undefined])(
+		'bounds and advertises the default queue with setting %s',
+		async (limit) => {
+			const job = await createJob();
+			const api = withLimit(limit);
+			const url = `${base()}/${job.id}/runs`;
+			for (let i = 0; i < 20; i++) await expectOk(await api('POST', url), 201);
+			await expectError(await api('POST', url), 429, 'RESOURCE_EXHAUSTED');
+			const capabilities = await expectOk<any>(await api('GET', '/capabilities'));
+			expect(capabilities.jobs.max_queued_runs_per_job).toBe(20);
+		},
+	);
 
 	it('bounds concurrent manual triggers atomically', async () => {
 		const job = await createJob();
@@ -444,6 +687,125 @@ describe('Job routes', () => {
 		expect(responses.filter((response) => response.status === 201)).toHaveLength(20);
 		expect(responses.filter((response) => response.status === 429)).toHaveLength(4);
 		expect(await expectPage(await request('GET', `${base()}/${job.id}/runs`))).toHaveLength(20);
+	});
+
+	it('accepts a 100-run burst across API replicas and replays at capacity', async () => {
+		const replicas = [withLimit(100), withLimit(100)];
+		const job = await createJob();
+		const url = `${base()}/${job.id}/runs`;
+		const responses = await Promise.all(
+			Array.from({ length: 100 }, (_, i) =>
+				Promise.resolve(
+					replicas[i % 2]('POST', url, undefined, { 'idempotency-key': `burst-${i}` }),
+				),
+			),
+		);
+		const runs = await Promise.all(responses.map((response) => expectOk<any>(response, 201)));
+		expect(new Set(runs.map((run) => run.run_id)).size).toBe(100);
+		expect(runs.every((run) => run.status === 'queued')).toBe(true);
+		await expectError(await replicas[0]('POST', url), 429, 'RESOURCE_EXHAUSTED');
+		const replay = await expectOk<any>(
+			await replicas[1]('POST', url, undefined, {
+				'idempotency-key': 'burst-0',
+			}),
+			201,
+		);
+		expect(replay.run_id).toBe(runs[0].run_id);
+		await expectOk(await replicas[0]('POST', `${url}/${runs[0].run_id}/cancel`));
+		await expectOk(await replicas[1]('POST', url), 201);
+		const capabilities = await expectOk<any>(await replicas[0]('GET', '/capabilities'));
+		expect(capabilities.jobs.max_queued_runs_per_job).toBe(100);
+	}, 30_000);
+
+	describe('queue admission boundaries', () => {
+		it('preserves queued runs when the limit decreases and admits again only below it', async () => {
+			const job = await createJob();
+			const url = `${base()}/${job.id}/runs`;
+			const high = withLimit(3);
+			const runs = [];
+			for (let i = 0; i < 3; i++) runs.push(await expectOk<JobRun>(await high('POST', url), 201));
+			const low = withLimit(1);
+			await expectError(await low('POST', url), 429, 'RESOURCE_EXHAUSTED');
+			expect(
+				(await expectPage<JobRun>(await low('GET', url))).every((run) => run.status === 'queued'),
+			).toBe(true);
+			for (const run of runs) {
+				await expectError(await low('POST', url), 429, 'RESOURCE_EXHAUSTED');
+				await expectOk(await low('POST', `${url}/${run.run_id}/cancel`));
+			}
+			expect((await expectOk<JobRun>(await low('POST', url), 201)).status).toBe('queued');
+		});
+
+		it('counts scheduled runs and delayed retries while isolating each job queue', async () => {
+			const job = await createJob();
+			const other = await createJob({ name: 'other' });
+			const definition = await services.jobs.getJob(pid, nid as never, job.id);
+			const scheduled = await services.jobRuns.enqueue({
+				job: definition,
+				trigger: 'schedule',
+				timeoutSeconds: 60,
+				scheduledFor: new Date().toISOString(),
+			});
+			await services.jobRuns.enqueue({
+				job: definition,
+				trigger: 'schedule',
+				timeoutSeconds: 60,
+				retryOf: scheduled.run_id,
+				eligibleAt: new Date(Date.now() + 60_000).toISOString(),
+			});
+			const limited = withLimit(1);
+			const url = `${base()}/${job.id}/runs`;
+			await expectError(await limited('POST', url), 429, 'RESOURCE_EXHAUSTED');
+			await expectOk(await limited('POST', `${base()}/${other.id}/runs`), 201);
+			await expectOk(await limited('POST', `${url}/${scheduled.run_id}/cancel`));
+			await expectError(await limited('POST', url), 429, 'RESOURCE_EXHAUSTED');
+		});
+
+		it.each([
+			['provisioning', ['provision']],
+			['running', ['provision', 'start']],
+			['failed', ['provision', 'fail']],
+			['timed_out', ['provision', 'timeout']],
+			['cancelled', ['provision', 'cancel']],
+			['succeeded', ['provision', 'start', 'succeed']],
+		] as const)(
+			'excludes %s runs even before their markers are cleaned up',
+			async (status, events) => {
+				const job = await createJob();
+				const limited = withLimit(1);
+				const url = `${base()}/${job.id}/runs`;
+				const accepted = await expectOk<JobRun>(await limited('POST', url), 201);
+				const run = await services.jobRuns.getRun(pid, nid as never, job.id, accepted.run_id);
+				for (const event of events) await services.jobRuns.transition(run, event);
+				expect((await services.jobRuns.getRun(pid, nid as never, job.id, run.run_id)).status).toBe(
+					status,
+				);
+				expect(await bucket.head(paths.jobRunMarker(pid, run.run_id))).not.toBeNull();
+				expect((await expectOk<JobRun>(await limited('POST', url), 201)).status).toBe('queued');
+				await expectError(await limited('POST', url), 429, 'RESOURCE_EXHAUSTED');
+			},
+		);
+
+		it('does not consume an idempotency key on overload and serializes duplicate retries', async () => {
+			const job = await createJob();
+			const url = `${base()}/${job.id}/runs`;
+			const limited = withLimit(1);
+			const accepted = await expectOk<JobRun>(await limited('POST', url), 201);
+			const headers = { 'idempotency-key': 'retry-after-overload' };
+			await expectError(await limited('POST', url, undefined, headers), 429, 'RESOURCE_EXHAUSTED');
+			await expectOk(await limited('POST', `${url}/${accepted.run_id}/cancel`));
+			const responses = await Promise.all(
+				Array.from({ length: 8 }, () =>
+					Promise.resolve(withLimit(1)('POST', url, undefined, headers)),
+				),
+			);
+			const retries = await Promise.all(
+				responses.map((response) => expectOk<JobRun>(response, 201)),
+			);
+			expect(new Set(retries.map((run) => run.run_id)).size).toBe(1);
+			expect(retries[0].run_id).not.toBe(accepted.run_id);
+			expect(await expectPage(await limited('GET', url))).toHaveLength(2);
+		});
 	});
 
 	it('advertises the job limits on capabilities', async () => {
@@ -564,7 +926,7 @@ describe('Job routes', () => {
 			await expectError(await stranger('GET', `${base()}/${job.id}/runs`), 404, 'NOT_FOUND');
 			// Writes take the editor gate first — the same 403 every notebook write route gives.
 			await expectError(await stranger('POST', base(), { name: 'x' }), 403, 'FORBIDDEN');
-			await expectError(await stranger('POST', `${base()}/${job.id}/runs`), 403, 'FORBIDDEN');
+			await expectError(await stranger('POST', `${base()}/${job.id}/runs`), 404, 'NOT_FOUND');
 		});
 
 		it('404s once the project is soft-deleted', async () => {

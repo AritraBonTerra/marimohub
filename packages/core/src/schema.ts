@@ -17,7 +17,6 @@ import {
 	ROLES,
 	SESSION_MODES,
 	SESSION_STATUSES,
-	SANDBOX_STARTUP_PHASES,
 	STARTUP_DETAIL_MAX_LENGTH,
 	SOURCE_TYPES,
 } from './constants';
@@ -975,16 +974,46 @@ export const SessionStopAttemptSchema = z.object({
 });
 export type SessionStopAttempt = z.infer<typeof SessionStopAttemptSchema>;
 
+// Stored phases stay open strings: a record written by a newer replica during a rolling deploy
+// must still parse here. Readers normalize to SANDBOX_STARTUP_PHASES.
+const StoredStartupPhaseSchema = z.string().min(1).max(64);
+
 export const SessionStartupSchema = z.object({
 	sandbox_id: SandboxIdSchema,
-	phase: z.enum(SANDBOX_STARTUP_PHASES),
+	phase: StoredStartupPhaseSchema,
 	detail: z.string().max(STARTUP_DETAIL_MAX_LENGTH).optional(),
 	attempt: z.number().int().positive(),
 	started_at: utcTimestamp(),
-	observed: z.array(z.enum(SANDBOX_STARTUP_PHASES)).max(SANDBOX_STARTUP_PHASES.length),
+	observed: z.array(StoredStartupPhaseSchema).max(32),
+});
+
+const SessionIntegrationsSchema = z
+	.array(
+		z.object({
+			id: IntegrationIdSchema,
+			name: z.string(),
+			kind: z.string(),
+			version: z.number().int().positive(),
+		}),
+	)
+	.optional();
+
+export const SessionStartupCompletionSchema = z.object({
+	id: z.uuid(),
+	sandbox_id: SandboxIdSchema,
+	ready_at: utcTimestamp(),
+	sandbox_url: z.url(),
+	sandbox_origin_url: z.url().optional(),
+	used_fallback: z.boolean().optional(),
+	expires_at: utcTimestamp().optional(),
+	sandbox_deadline_at: utcTimestamp().optional(),
+	reconnect_reference: SandboxReconnectReferenceSchema.optional(),
+	integrations: SessionIntegrationsSchema,
+	startup: SessionStartupSchema.optional(),
 });
 
 export const SessionSchema = z.looseObject({
+	startup_completion: SessionStartupCompletionSchema.optional(),
 	startup: SessionStartupSchema.optional(),
 	status_changed_at: utcTimestamp().optional(),
 	stop: SessionStopAttemptSchema.optional(),
@@ -1102,16 +1131,7 @@ export const SessionSchema = z.looseObject({
 	 * sandbox at provision. Written once at `setRunning`, never mutated. Absent =
 	 * none rendered (or the record predates integrations).
 	 */
-	integrations: z
-		.array(
-			z.object({
-				id: IntegrationIdSchema,
-				name: z.string(),
-				kind: z.string(),
-				version: z.number().int().positive(),
-			}),
-		)
-		.optional(),
+	integrations: SessionIntegrationsSchema,
 });
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -1220,7 +1240,7 @@ export const MAX_JOB_PARAMETERS = 32;
 export const MAX_JOB_PARAMETER_VALUE_LENGTH = 4096;
 export const MAX_JOB_RETRIES = 5;
 export const MAX_JOB_RETRY_BACKOFF_SECONDS = 3600;
-export const MAX_QUEUED_RUNS_PER_JOB = 20;
+export const DEFAULT_MAX_QUEUED_RUNS_PER_JOB = 20;
 export const MIN_JOB_TIMEOUT_SECONDS = 60;
 
 export const CURRENT_JOB_DEFINITION_VERSION = 1;
@@ -1271,6 +1291,8 @@ export const JobDefinitionSchema = z.looseObject({
 	project_id: ProjectIdSchema,
 	name: z.string().min(1).max(MAX_JOB_NAME_LENGTH),
 	enabled: z.boolean(),
+	consumer_execution: z.boolean().optional(),
+	consumer_history: z.enum(['private', 'shared']).optional(),
 	/** Absent = manual-trigger only. */
 	schedule: JobScheduleSchema.optional(),
 	/** Passed to the notebook as `mo.cli_args()`. */
@@ -1292,7 +1314,26 @@ export const RunErrorSchema = z.looseObject({ code: z.string(), message: z.strin
 
 export type RunError = z.infer<typeof RunErrorSchema>;
 
+export const RunTagKeySchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/);
+export const RunTagValueSchema = z.string().max(256);
+export const RunTagsSchema = z
+	.record(RunTagKeySchema, RunTagValueSchema)
+	.refine((tags) => Object.keys(tags).length <= 32, 'At most 32 tags are allowed')
+	.refine(
+		(tags) => new TextEncoder().encode(JSON.stringify(tags)).length <= 8192,
+		'Tags must fit in 8192 UTF-8 bytes',
+	)
+	.meta({ maxProperties: 32 });
+export type RunTags = z.infer<typeof RunTagsSchema>;
+export const ProjectRunIndexSchema = z.object({
+	notebook_id: NotebookIdSchema,
+	job_id: JobIdSchema,
+	run_id: RunIdSchema,
+});
+export type ProjectRunIndex = z.infer<typeof ProjectRunIndexSchema>;
+
 export const JobRunSchema = z.looseObject({
+	tags: RunTagsSchema.optional(),
 	schema_version: z.literal(CURRENT_JOB_RUN_VERSION),
 	run_id: RunIdSchema,
 	job_id: JobIdSchema,
@@ -1408,6 +1449,8 @@ export type PublicJobDefinition = Pick<
 	| 'project_id'
 	| 'name'
 	| 'enabled'
+	| 'consumer_execution'
+	| 'consumer_history'
 	| 'schedule'
 	| 'parameters'
 	| 'retry'
@@ -1426,6 +1469,8 @@ export function toPublicJobDefinition(job: JobDefinition): PublicJobDefinition {
 		project_id: job.project_id,
 		name: job.name,
 		enabled: job.enabled,
+		consumer_execution: job.consumer_execution ?? false,
+		consumer_history: job.consumer_history ?? 'private',
 		...(job.schedule !== undefined
 			? { schedule: { cron: job.schedule.cron, timezone: job.schedule.timezone } }
 			: {}),
@@ -1449,6 +1494,7 @@ export function toPublicJobDefinition(job: JobDefinition): PublicJobDefinition {
 
 export type PublicJobRun = Pick<
 	JobRun,
+	| 'tags'
 	| 'run_id'
 	| 'job_id'
 	| 'notebook_id'
@@ -1478,6 +1524,7 @@ export type PublicJobRun = Pick<
 
 export function toPublicJobRun(run: JobRun): PublicJobRun {
 	return {
+		tags: run.tags,
 		run_id: run.run_id,
 		job_id: run.job_id,
 		notebook_id: run.notebook_id,

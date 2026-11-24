@@ -9,6 +9,8 @@ import {
 	WORKING_BRANCH_CLEANUP_KEY,
 } from '../services/content/workingBranchRecords';
 import { MigrationStateSchema } from '../services/catalog/MigrationService';
+import { MetadataBackendMarkerSchema } from '../storage/backendMarker';
+import { METADATA_BACKEND_KEY } from '../storage/metadataKeys';
 import { HostRetryCleanupSchema, HostRetryRecordSchema } from '../services/runtime/HostRetryStore';
 import {
 	SearchHeadSchema,
@@ -76,6 +78,7 @@ import {
 	JobOccurrenceSchema,
 	JobRunMarkerSchema,
 	JobRunSchema,
+	ProjectRunIndexSchema,
 	NotebookMetaSchema,
 	PreviewRuntimeMetaSchema,
 	NotebookProposalSchema,
@@ -496,6 +499,16 @@ export const STORED_OBJECTS: BucketObject[] = [
 		tag: 'job',
 	},
 	{
+		name: 'ProjectRunIndex',
+		key: `${project.runIndexPrefix}{reverse_ulid}.json`,
+		schema: ProjectRunIndexSchema,
+		summary:
+			'Rebuildable newest-first run locator. Tags, state and authorization remain in authoritative records.',
+		tag: 'job',
+		mutability: 'immutable',
+		owner: 'JobRunService',
+	},
+	{
 		name: 'JobRun',
 		key: jobRun.record,
 		schema: JobRunSchema,
@@ -718,6 +731,16 @@ export const STORED_OBJECTS: BucketObject[] = [
 		schema: EventSchema,
 		summary: 'Append-only audit event.',
 		mutability: 'append-only',
+		tag: 'ops',
+	},
+	{
+		name: 'MetadataBackendMarker',
+		key: METADATA_BACKEND_KEY,
+		schema: MetadataBackendMarkerSchema,
+		summary:
+			'Selects the metadata backend (bucket or PostgreSQL) and its epoch. Always stored in the artifact bucket; hosts refuse to start while it is frozen.',
+		mutability: 'cas',
+		owner: 'MetadataTransfer',
 		tag: 'ops',
 	},
 	{

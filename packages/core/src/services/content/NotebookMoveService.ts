@@ -602,6 +602,8 @@ export class NotebookMoveService {
 				(namespace) => new AppPoolStore(this.bucket, undefined, namespace),
 			);
 			for (const notebookId of [nid, ...move.runtimes]) {
+				// Locators derive from the copied run index, so they must go before the prefix.
+				await this.owners.jobRuns.deleteProjectLocators(destination, notebookId);
 				await deleteByPrefix(
 					this.bucket,
 					`${paths.project(destination).notebook(notebookId).base}/`,

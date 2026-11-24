@@ -22,7 +22,7 @@ import { occurrenceKey, parseCron, previousOccurrence } from './cron';
 import { indexedJobs } from './JobsService';
 import type { IndexedJob, JobsService } from './JobsService';
 import type { JobRunService } from './JobRunService';
-import { isActiveRunStatus, isTerminalRunStatus } from './runState';
+import { isSandboxHoldingRunStatus, isTerminalRunStatus } from './runState';
 
 const IDLE_RECOVERY_BATCH = 25;
 
@@ -541,7 +541,7 @@ export class JobScheduler {
 	 * CAS `timed_out`. Also covers a scheduler process that died mid-execution.
 	 */
 	private async watchdog(run: JobRun, now: number): Promise<boolean> {
-		if (!isActiveRunStatus(run.status)) return false;
+		if (!isSandboxHoldingRunStatus(run.status)) return false;
 		const grace = this.deps.config.watchdogGraceMs ?? DEFAULT_WATCHDOG_GRACE_MS;
 		const deadline = run.deadline_at
 			? Date.parse(run.deadline_at)
@@ -624,6 +624,8 @@ export class JobScheduler {
 	private async finalizeLocked(finished: JobRun): Promise<void> {
 		const marker = await this.deps.runs.getMarker(finished);
 		if (!marker) return;
+		// A locator write that fails must retry on the next tick before any alert is sent.
+		await this.deps.runs.publishProjectRun(finished);
 		await this.afterRun(finished, marker.continuation_run_id);
 		await this.deps.runs.deleteMarker(finished);
 	}
@@ -648,6 +650,7 @@ export class JobScheduler {
 				triggeredBy: finished.triggered_by,
 				scheduledFor: finished.scheduled_for,
 				parameters: finished.parameters,
+				tags: finished.tags,
 				sourceVersionId: finished.source_version_id,
 				timeoutSeconds: finished.timeout_seconds,
 				attempt: finished.attempt + 1,

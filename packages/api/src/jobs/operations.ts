@@ -1,7 +1,16 @@
 import {
+	isTerminalRunStatus,
+	jobCapabilities,
+	MAX_ACTIVE_CONSUMER_RUNS_PER_JOB,
+	toSharedJobRunSummary,
+} from '@marimo-hub/core/jobs';
+import type { JobCapabilities } from '@marimo-hub/core/jobs';
+import {
 	BadRequestError,
+	ForbiddenError,
+	toPublicJobRun,
 	JobId,
-	MAX_QUEUED_RUNS_PER_JOB,
+	DEFAULT_MAX_QUEUED_RUNS_PER_JOB,
 	Millis,
 	NotFoundError,
 	ResourceExhaustedError,
@@ -21,7 +30,12 @@ import type { ApiDeps, JobsConfig } from '../context';
 import { idempotentOperation } from '../idempotency';
 import { appendAudit } from '../log';
 import { decodeCursor, DEFAULT_PAGE_SIZE, encodeCursor, MAX_PAGE_SIZE } from '../pagination';
-import { assertProjectRole, loadAuthorizedNotebookMeta, loadVisibleProject } from '../shared';
+import {
+	authorizationService,
+	assertProjectRole,
+	loadAuthorizedNotebookMeta,
+	loadSessionProject,
+} from '../shared';
 import type { CreateJobBody, TriggerRunBody, UpdateJobBody } from './schemas';
 
 export function requireJobs(deps: ApiDeps): JobsConfig {
@@ -48,9 +62,44 @@ export async function authorizeJobNotebook(
 	const project =
 		action === 'notebook.write'
 			? await assertProjectRole(deps.services.projects, pid, user, action, deps)
-			: await loadVisibleProject(deps.services.projects, pid, user, deps);
-	const notebook = await loadAuthorizedNotebookMeta(deps, project, nid, user, action);
+			: await loadSessionProject(deps.services.projects, pid, user, deps);
+	const notebook = await loadAuthorizedNotebookMeta(
+		deps,
+		project,
+		nid,
+		user,
+		action === 'project.read' ? authorizationService(deps).appReadAction(user, project) : action,
+	);
 	return { project, notebook, user };
+}
+
+export type JobNotebookAction = 'project.read' | 'notebook.write';
+export type JobAction = JobNotebookAction | 'job.trigger';
+
+export async function resolveJobAccess<T>(
+	action: JobAction,
+	resolve: (action: JobNotebookAction) => Promise<T>,
+): Promise<{ target: T; action: JobNotebookAction }> {
+	if (action !== 'job.trigger') return { target: await resolve(action), action };
+	// Write-only credentials must keep working without a separate read grant.
+	try {
+		return { target: await resolve('notebook.write'), action: 'notebook.write' };
+	} catch (error) {
+		if (!(error instanceof ForbiddenError || error instanceof NotFoundError)) throw error;
+		return { target: await resolve('project.read'), action: 'project.read' };
+	}
+}
+
+export async function loadAuthorizedJob(
+	deps: ApiDeps,
+	user: AuthenticatedPrincipal,
+	pid: ProjectId,
+	nid: NotebookId,
+	jid: JobId,
+	action: JobNotebookAction = 'project.read',
+) {
+	const target = await authorizeJobNotebook(deps, user, pid, nid, action);
+	return { ...target, job: await deps.services.jobs.getJob(pid, nid, jid) };
 }
 
 export type AuthorizedNotebook = Awaited<ReturnType<typeof authorizeJobNotebook>>;
@@ -115,6 +164,10 @@ export function updateNotebookJob(
 	});
 }
 
+type JobRunReplay =
+	| { scope: string; key?: string }
+	| ((enqueue: () => Promise<JobRun>) => Promise<JobRun>);
+
 export async function triggerJobRun(
 	deps: ApiDeps,
 	target: AuthorizedNotebook,
@@ -122,24 +175,35 @@ export async function triggerJobRun(
 	body: z.infer<typeof TriggerRunBody> | undefined,
 	request: { requestId?: string; method: string; path: string },
 	signal?: AbortSignal,
-	replay?: { scope: string; key?: string },
+	replay?: JobRunReplay,
 ) {
 	const { project, notebook, user } = target;
 	return deps.services.jobRuns.withJobMutation(job, async () => {
 		if (await deps.services.jobs.isDeleting(job))
 			throw new NotFoundError(`Job ${job.id} not found`);
 		signal?.throwIfAborted();
+		const current = await deps.services.jobs.getJob(project.id, notebook.id, job.id);
+		const { editor } = await authorizeJobTrigger(deps, target, current);
 		const enqueue = async () => {
-			const current = await deps.services.jobs.getJob(project.id, notebook.id, job.id);
-			const queued = (await deps.services.jobRuns.listActive()).filter(
-				({ marker, run }) => marker.job_id === job.id && run?.status === 'queued',
+			const config = requireJobs(deps);
+			const queueLimit = config.maxQueuedRunsPerJob ?? DEFAULT_MAX_QUEUED_RUNS_PER_JOB;
+			const active = (await deps.services.jobRuns.listActive(project.id)).flatMap(
+				({ marker, run }) => (marker.job_id === job.id && run ? [run] : []),
 			);
-			if (queued.length >= MAX_QUEUED_RUNS_PER_JOB) {
+			if (
+				!editor &&
+				active.filter((run) => run.triggered_by === user.id && !isTerminalRunStatus(run.status))
+					.length >= MAX_ACTIVE_CONSUMER_RUNS_PER_JOB
+			) {
 				throw new ResourceExhaustedError(
-					`Too many queued runs for this job (${MAX_QUEUED_RUNS_PER_JOB}); wait for the queue to drain.`,
+					`You already have ${MAX_ACTIVE_CONSUMER_RUNS_PER_JOB} runs of this job in progress; wait for one to finish.`,
 				);
 			}
-			const config = requireJobs(deps);
+			if (active.filter((run) => run.status === 'queued').length >= queueLimit) {
+				throw new ResourceExhaustedError(
+					`Too many queued runs for this job (${queueLimit}); wait for the queue to drain.`,
+				);
+			}
 			const requestedMs =
 				current.timeout_seconds !== undefined
 					? current.timeout_seconds * 1000
@@ -150,6 +214,7 @@ export async function triggerJobRun(
 				trigger: 'manual',
 				triggeredBy: user.id,
 				parameters: body?.parameters ?? current.parameters,
+				tags: body?.tags,
 				sourceVersionId:
 					(await deps.services.notebooks.getNotebookSource(project.id, notebook.id))
 						.current_version_id ?? undefined,
@@ -167,8 +232,9 @@ export async function triggerJobRun(
 			);
 			return run;
 		};
-		if (!replay?.key) return enqueue();
 		// Keep lookup, enqueue, and recording under the same distributed job claim.
+		if (typeof replay === 'function') return replay(enqueue);
+		if (!replay?.key) return enqueue();
 		let created: JobRun | undefined;
 		const runId = await idempotentOperation(deps, replay.scope, replay.key, async () => {
 			created = await enqueue();
@@ -182,4 +248,58 @@ export async function loadJobRun(deps: ApiDeps, job: JobDefinition, rid: RunId) 
 	const run = await deps.services.jobRuns.getRun(job.project_id, job.notebook_id, job.id, rid);
 	if (run.job_id !== job.id) throw new NotFoundError(`Run ${rid} not found`);
 	return run;
+}
+
+export async function getJobCapabilities(
+	deps: ApiDeps,
+	target: AuthorizedNotebook,
+	job: JobDefinition,
+	run?: JobRun,
+): Promise<JobCapabilities> {
+	const authz = authorizationService(deps);
+	const resource = {
+		kind: 'project' as const,
+		project: target.project,
+		notebookLabels: target.notebook.security_labels ?? null,
+	};
+	const editor = await authz.authorize(target.user, 'notebook.write', resource);
+	const trigger = await authz.authorize(target.user, 'job.trigger', resource);
+	return jobCapabilities({
+		job,
+		run,
+		userId: target.user.id,
+		editor: editor.allowed,
+		triggerAllowed: trigger.allowed,
+	});
+}
+
+export async function authorizeJobTrigger(
+	deps: ApiDeps,
+	target: AuthorizedNotebook,
+	job: JobDefinition,
+) {
+	const capabilities = await getJobCapabilities(deps, target, job);
+	if (!capabilities.canTrigger)
+		throw new ForbiddenError('This job does not permit execution by this caller');
+	return capabilities;
+}
+
+export function projectJobRun(run: JobRun, capabilities: JobCapabilities) {
+	switch (capabilities.history) {
+		case 'full':
+			return toPublicJobRun(run);
+		case 'summary':
+			return toSharedJobRunSummary(run);
+		case 'none':
+			return null;
+	}
+}
+
+export async function visibleJobRun(
+	deps: ApiDeps,
+	target: AuthorizedNotebook,
+	job: JobDefinition,
+	run: JobRun,
+) {
+	return projectJobRun(run, await getJobCapabilities(deps, target, job, run));
 }
