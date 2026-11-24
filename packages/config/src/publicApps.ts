@@ -9,7 +9,7 @@ const DEFAULT_MAX_CONCURRENT_SESSIONS = 10;
 const DEFAULT_MAX_SESSIONS_PER_VERSION = 2;
 const DEFAULT_MAX_VISITS_PER_SESSION = 25;
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 300;
-const DEFAULT_MAX_LIFETIME_SECONDS = 3600;
+const DEFAULT_MAX_LIFETIME_SECONDS = 1800;
 const DEFAULT_VISIT_TOKEN_TTL_SECONDS = 600;
 
 function positiveCap(env: Env, key: string, fallback: number): number {
@@ -35,14 +35,14 @@ export function parsePublicAppsConfig(
 	});
 	if (!enabled) return undefined;
 
-	const isIngressAuth =
-		context.authBackend === 'proxy-header' || context.authBackend === 'cloudflare-access';
-	if (isIngressAuth && context.exposureMode === 'proxy') {
+	if (context.exposureMode === 'proxy') {
 		throw new ConfigError(
-			`MARIMOHUB_PUBLIC_APP_LINKS=on cannot be combined with MARIMOHUB_AUTH_BACKEND=${context.authBackend} and MARIMOHUB_SANDBOX_EXPOSURE=proxy: bypassing ingress auth on /proxy/* would expose authenticated proxy sessions. Use MARIMOHUB_SANDBOX_EXPOSURE=subdomain or built-in OIDC auth.`,
-			{ variable: 'MARIMOHUB_PUBLIC_APP_LINKS', docs: 'docs/security.md' },
+			'MARIMOHUB_PUBLIC_APP_LINKS=on cannot be combined with MARIMOHUB_SANDBOX_EXPOSURE=proxy: public notebooks would run on the hub origin. Use MARIMOHUB_SANDBOX_EXPOSURE=subdomain.',
+			{ variable: 'MARIMOHUB_PUBLIC_APP_LINKS', docs: 'docs/apps.md' },
 		);
 	}
+	const isIngressAuth =
+		context.authBackend === 'proxy-header' || context.authBackend === 'cloudflare-access';
 	if (isIngressAuth && !parseBool(env, 'MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK', false)) {
 		throw new ConfigError(
 			`MARIMOHUB_PUBLIC_APP_LINKS=on with MARIMOHUB_AUTH_BACKEND=${context.authBackend} requires MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK=true after configuring ingress bypass rules for /app/*, /api/public/v1/*, /api/v1/theme, /manifest.webmanifest, /_marimo/*, and static assets (never /api/v1/* or /proxy/*).`,

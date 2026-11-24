@@ -176,10 +176,18 @@ Key isolation guarantees:
   invalidates the public grant and terminates running public sandboxes.
   Disabling public access works even if `MARIMOHUB_PUBLIC_APP_LINKS` is turned
   back off.
-- **Exposure and auth backends.** Built-in OIDC/OAuth works with both
-  `subdomain` (recommended) and `proxy` exposure modes. `proxy-header` and
-  `cloudflare-access` require `subdomain` exposure,
-  `MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK=true`, and a dedicated
+- **Bounded sandboxes.** Every public sandbox requires a per-session kernel
+  token, whatever `MARIMOHUB_SANDBOX_AUTH` says, and never starts from an
+  editor's filesystem snapshot. On Modal, the provider stops the sandbox 2 minutes
+  after `MARIMOHUB_PUBLIC_APPS_MAX_LIFETIME_SECONDS` (30 minutes by default) even
+  if the hub is down, and the sandbox gets none of
+  `MARIMOHUB_COMPUTE_MODAL_SECRETS`. Other compute backends rely on the hub to
+  enforce the lifetime.
+- **No app jobs.** `marimohub.jobs` raises an error in public sandboxes.
+- **Exposure and auth backends.** Public links require `subdomain` exposure. The
+  hub refuses to start with `MARIMOHUB_PUBLIC_APP_LINKS=on` and
+  `MARIMOHUB_SANDBOX_EXPOSURE=proxy`. `proxy-header` and `cloudflare-access` also
+  require `MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK=true` and a dedicated
   `MARIMOHUB_PUBLIC_APPS_SECRET`.
 - **Bounded capacity.** Public sandboxes use separate deployment caps
   (`MARIMOHUB_PUBLIC_APPS_MAX_SESSIONS`,

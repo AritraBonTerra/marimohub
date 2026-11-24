@@ -55,6 +55,12 @@ Without GPU support, the hub strips GPU values and warns at startup.
 Without either flag, profiles remain disabled and startup warns about ignored configuration.
 The adapter `apiVersion` remains `1`.
 
+Two `CreateSandboxOptions` fields limit public app sandboxes. Adapters may ignore both, and only
+`compute-modal` enforces them today:
+
+- `maxLifetimeMs`: the provider must stop the sandbox this long after creation, whatever the hub does.
+- `deploymentSecrets: false`: withhold secrets the adapter injects into every sandbox.
+
 At startup, the loader validates the five required `Bucket` methods and its CAS
 safety contract. For compute, it validates `create` and `proxy`, plus optional
 methods when present. It validates the first `SandboxInstance` after the provider

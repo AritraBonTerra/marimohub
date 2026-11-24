@@ -951,7 +951,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_COMPUTE_MODAL_SECRETS',
 						name: 'Modal secrets',
 						description:
-							'Comma-separated Modal secret names injected into every new sandbox, deployment-wide. Secrets must exist in the configured Modal environment. Unset or empty adds none. Every editor, app, and job sandbox in every project receives these values, and any notebook author can read them. Use project integration secret references for project-scoped credentials.',
+							'Comma-separated Modal secret names injected into every new sandbox, deployment-wide. Secrets must exist in the configured Modal environment. Unset or empty adds none. Every editor, member app, and job sandbox in every project receives these values, and any notebook author can read them. Public app sandboxes never receive them. Use project integration secret references for project-scoped credentials.',
 						example: 'shared-credentials,huggingface',
 						optIn: true,
 					},
@@ -1343,7 +1343,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_SANDBOX_AUTH',
 						name: 'Sandbox authentication',
 						description:
-							'Enable native marimo token authentication for new editor and app sessions: `on` or `off`. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements.',
+							'Enable native marimo token authentication for new editor and app sessions: `on` or `off`. Public app sessions always use it. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements.',
 						default: 'off',
 						example: 'on',
 					},
@@ -1803,7 +1803,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_PUBLIC_APP_LINKS',
 						name: 'Public app links',
 						description:
-							'Allow project managers to opt individual `/app/<slug>` links into unauthenticated public access (`off` | `on`). Public apps run in dedicated isolated pools.',
+							'Allow project managers to opt individual `/app/<slug>` links into unauthenticated public access (`off` | `on`). Public apps run in dedicated isolated pools and require `subdomain` sandbox exposure.',
 						default: 'off',
 					},
 					{
@@ -1849,20 +1849,21 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 					{
 						id: 'MARIMOHUB_PUBLIC_APPS_MAX_LIFETIME_SECONDS',
 						name: 'Public app max lifetime (seconds)',
-						description: 'Non-extendable hard lifetime ceiling for public app sandboxes.',
-						default: '3600',
+						description:
+							'Non-extendable hard lifetime ceiling for public app sandboxes. The Modal adapter also makes Modal stop the sandbox 2 minutes after this, at most 24 hours after creation. Other compute backends rely on the hub alone.',
+						default: '1800',
 					},
 					{
 						id: 'MARIMOHUB_PUBLIC_APPS_VISIT_TOKEN_TTL_SECONDS',
 						name: 'Public app visit token TTL (seconds)',
-						description: 'Sliding TTL for encrypted public app visit tokens and proxy cookies.',
+						description: 'Sliding TTL for encrypted public app visit tokens.',
 						default: '600',
 					},
 					{
 						id: 'MARIMOHUB_PUBLIC_APPS_EDGE_BYPASS_ACK',
 						name: 'Acknowledge edge auth bypass for public apps',
 						description:
-							'Required (`true`) when enabling public app links with `proxy-header` or `cloudflare-access` in `subdomain` exposure mode.',
+							'Required (`true`) when enabling public app links with `proxy-header` or `cloudflare-access`.',
 						default: 'false',
 					},
 					{

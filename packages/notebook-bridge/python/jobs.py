@@ -1,5 +1,6 @@
 """Visitor-scoped job calls for hosted marimo apps."""
 import json
+import os
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -13,6 +14,9 @@ _UNSET = object()
 
 class Jobs:
     def __init__(self, request=_UNSET):
+        # A visitor who reaches the kernel directly can forge the job headers.
+        if os.environ.get("MARIMOHUB_APP_JOBS") == "off":
+            raise RuntimeError("Jobs are unavailable in public apps")
         if request is _UNSET:
             import marimo as mo
 

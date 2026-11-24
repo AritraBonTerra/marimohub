@@ -16,7 +16,15 @@ import type { NotebookService } from './NotebookService';
 
 type CreateOrRestoreSandboxOptions = Pick<
 	CreateSandboxOptions,
-	'image' | 'resources' | 'userHome' | 'sessionIdleTimeoutMs' | 'owner' | 'notebook' | 'onProgress'
+	| 'image'
+	| 'resources'
+	| 'userHome'
+	| 'sessionIdleTimeoutMs'
+	| 'maxLifetimeMs'
+	| 'deploymentSecrets'
+	| 'owner'
+	| 'notebook'
+	| 'onProgress'
 >;
 
 /**
@@ -76,6 +84,10 @@ export function createOrRestoreSandbox(
 		...(options.userHome ? { userHome: options.userHome } : {}),
 		...(options.sessionIdleTimeoutMs !== undefined
 			? { sessionIdleTimeoutMs: options.sessionIdleTimeoutMs }
+			: {}),
+		...(options.maxLifetimeMs !== undefined ? { maxLifetimeMs: options.maxLifetimeMs } : {}),
+		...(options.deploymentSecrets !== undefined
+			? { deploymentSecrets: options.deploymentSecrets }
 			: {}),
 		...(options.owner ? { owner: options.owner } : {}),
 		...(options.notebook ? { notebook: options.notebook } : {}),

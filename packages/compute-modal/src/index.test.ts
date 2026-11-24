@@ -742,6 +742,35 @@ describe('ModalCompute', () => {
 		},
 	);
 
+	it('limits the lifetime and withholds deployment secrets for one sandbox', async () => {
+		const world = makeWorld();
+		const compute = makeCompute(world, { secretNames: ['shared-credentials'] });
+
+		await compute
+			.create(SANDBOX_ID, {
+				reuse: false,
+				maxLifetimeMs: Millis.minutes(32),
+				deploymentSecrets: false,
+			})
+			.exec('true');
+		expect(world.client.secrets.fromName).not.toHaveBeenCalled();
+		expect(world.created[0].options.timeoutMs).toBe(32 * 60_000);
+		expect(world.created[0].options).not.toHaveProperty('secrets');
+
+		await compute.create('sb-member' as SandboxId, { reuse: false }).exec('true');
+		expect(world.created[1].options.timeoutMs).toBe(24 * 60 * 60_000);
+		expect(world.created[1].options.secrets).toHaveLength(1);
+	});
+
+	it.each([
+		[Millis.of(90_500), 91_000],
+		[Millis.hours(25), 24 * 60 * 60_000],
+	])('fits a %i ms lifetime to what Modal accepts', async (maxLifetimeMs, timeoutMs) => {
+		const world = makeWorld();
+		await makeCompute(world).create(SANDBOX_ID, { reuse: false, maxLifetimeMs }).exec('true');
+		expect(world.created[0].options.timeoutMs).toBe(timeoutMs);
+	});
+
 	it('waits for the named image after app and secret lookups finish', async () => {
 		const world = makeWorld();
 		const { app, image, firstSecret, secondSecret } = deferLookups(world);

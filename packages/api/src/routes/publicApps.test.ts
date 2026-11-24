@@ -2,15 +2,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	createServices,
 	DEFAULT_APP_POOL_POLICY,
+	KERNEL_AUTH_TOKEN_PATTERN,
 	Millis,
 	ProxyExposure,
 	sessionAudience,
+	SubdomainExposure,
 } from '@marimo-hub/core';
 import type { DeepLink, ProjectIntegrationsService } from '@marimo-hub/core';
 import {
 	ACTOR,
 	localResourceSecurity,
 	makeFakeCompute,
+	makeFakeSandbox,
 	makeSubjectContext,
 	uid,
 } from '@marimo-hub/core/testing';
@@ -18,6 +21,7 @@ import type { PublicAppsConfig } from '../context';
 import { createInitializedBucket, createTestApi, expectError, expectOk } from '../testing';
 import { PUBLIC_VISIT_COOKIE_NAME, PUBLIC_VISIT_TOKEN_HEADER } from './publicApps';
 import { authorizeProxyRequest } from '../sandboxProxy';
+import { makeFakeSnapshotCompute } from '../testing/snapshotCompute';
 import { sweepAppPools } from '../appPools';
 
 const PUBLIC_SECRET = 'test-public-app-links-signing-secret-32-bytes!';
@@ -39,13 +43,6 @@ function makePublicConfig(overrides: Partial<PublicAppsConfig> = {}): PublicApps
 		visitTokenTtlSeconds: 600,
 		...overrides,
 	};
-}
-
-function extractCookieValue(res: Response, name: string): string | undefined {
-	const header = res.headers.get('set-cookie');
-	if (!header) return undefined;
-	const match = new RegExp(`${name}=([^;]+)`).exec(header);
-	return match?.[1];
 }
 
 async function setupProjectAndNotebook() {
@@ -157,8 +154,6 @@ describe('Public app links', () => {
 		expect(published.access.mode).toBe('public');
 		expect(published.access.grant_id).toBeTruthy();
 
-		// Anonymous visitor resolves and starts a visit in proxy mode.
-		const proxyExposure = new ProxyExposure(PROXY_SECRET);
 		const compute = makeFakeCompute();
 		const anon = createTestApi({
 			bucket,
@@ -168,7 +163,7 @@ describe('Public app links', () => {
 				publicApps,
 				sandbox: {
 					...manager.deps.sandbox,
-					exposure: proxyExposure,
+					exposure: new SubdomainExposure(),
 					appBaseUrl: 'https://hub.example.com',
 				},
 			},
@@ -217,10 +212,17 @@ describe('Public app links', () => {
 			};
 		};
 		expect(visitBody.data.status).toBe('running');
-		expect(visitBody.data.sandbox_url).toContain('.pub.');
 		expect(visitBody.data.visit_token.startsWith('v1.')).toBe(true);
-		const cookieValue = extractCookieValue(startRes, PUBLIC_VISIT_COOKIE_NAME);
-		expect(cookieValue).toBe(visitBody.data.visit_token);
+		expect(startRes.headers.get('set-cookie')).toBeNull();
+
+		// The tunnel URL carries a kernel token although this deployment leaves sandbox auth off.
+		expect(anon.deps.sandbox.auth).not.toBe('on');
+		const [stored] = await services.sessions.listActivePublicApps();
+		expect(stored.kernel_auth_token).toMatch(KERNEL_AUTH_TOKEN_PATTERN);
+		expect(stored.sandbox_origin_url).toBeUndefined();
+		const sandboxUrl = new URL(visitBody.data.sandbox_url!);
+		expect(sandboxUrl.host).not.toBe('hub.example.com');
+		expect(sandboxUrl.searchParams.get('access_token')).toBe(stored.kernel_auth_token);
 
 		// Visit token MUST NOT grant access to any authenticated `/api/v1/*` route.
 		const meRes = await anon.app.request('/api/v1/me', {
@@ -241,31 +243,6 @@ describe('Public app links', () => {
 			},
 		);
 		expect(projectsRes.status).toBe(401);
-
-		// Proxy request succeeds with cookie, fails without cookie, and rejects /surface-proxy/*.
-		const sandboxPath = new URL(visitBody.data.sandbox_url!).pathname;
-		const proxyOk = await authorizeProxyRequest(
-			new Request(`https://hub.example.com${sandboxPath}`, {
-				headers: { Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${cookieValue}` },
-			}),
-			anon.deps,
-		);
-		expect(proxyOk.kind).toBe('forward');
-
-		const proxyNoCookie = await authorizeProxyRequest(
-			new Request(`https://hub.example.com${sandboxPath}`),
-			anon.deps,
-		);
-		expect(proxyNoCookie.kind).toBe('reject');
-
-		const proxyToken = (sandboxPath.split('/proxy/')[1] ?? '').replace(/\/$/, '');
-		const surfaceReject = await authorizeProxyRequest(
-			new Request(`https://hub.example.com/surface-proxy/${proxyToken}/vscode/`, {
-				headers: { Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${cookieValue}` },
-			}),
-			anon.deps,
-		);
-		expect(surfaceReject).toMatchObject({ kind: 'reject', status: 403 });
 
 		// Heartbeat succeeds with X-MH-Visit-Token.
 		const hbRes = await anon.app.request('/api/public/v1/visits/heartbeat', {
@@ -291,19 +268,13 @@ describe('Public app links', () => {
 		);
 		expect(disabled.access).toEqual({ mode: 'inherit' });
 
-		// Old token & proxy cookie immediately fail.
+		// The old token immediately fails and the sandbox behind the copied URL is gone.
 		const hbAfterRevoke = await anon.app.request('/api/public/v1/visits/heartbeat', {
 			method: 'POST',
 			headers: { [PUBLIC_VISIT_TOKEN_HEADER]: visitBody.data.visit_token },
 		});
 		expect(hbAfterRevoke.status).toBe(404);
-		const proxyAfterRevoke = await authorizeProxyRequest(
-			new Request(`https://hub.example.com${sandboxPath}`, {
-				headers: { Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${cookieValue}` },
-			}),
-			anon.deps,
-		);
-		expect(proxyAfterRevoke.kind).toBe('reject');
+		expect(await services.sessions.listActivePublicApps()).toHaveLength(0);
 
 		// Re-enabling rotates grant_id so old tokens are never revived.
 		const republished = await expectOk<DeepLink>(
@@ -320,6 +291,62 @@ describe('Public app links', () => {
 		expect(hbOldTokenAfterRepublish.status).toBe(404);
 	});
 
+	it('bounds public sandboxes without changing member app sandboxes', async () => {
+		const { bucket, services, project, notebook } = await setupProjectAndNotebook();
+		await services.notebooks.setFsSnapshot(project.id, notebook.id, {
+			snapshot_id: 'snap-editor',
+			captured_at: new Date().toISOString(),
+		});
+		const fake = makeFakeSandbox();
+		const compute = makeFakeSnapshotCompute(fake.instance);
+		const create = vi.spyOn(compute, 'create');
+		const client = createTestApi({
+			bucket,
+			compute,
+			deps: { publicApps: makePublicConfig({ maxLifetimeMs: Millis.minutes(30) }) },
+		});
+		const base = `/projects/${project.id}/notebooks/${notebook.id}`;
+
+		await expectOk(await client.request('POST', `${base}/sessions`, { mode: 'app' }));
+		expect(create).not.toHaveBeenCalled();
+		expect(compute.createFromSnapshot).toHaveBeenCalledOnce();
+		const memberOptions = compute.createFromSnapshot.mock.calls[0][2];
+		expect(memberOptions).not.toHaveProperty('maxLifetimeMs');
+		expect(memberOptions).not.toHaveProperty('deploymentSecrets');
+		expect(fake.calls.setEnvVars.some((vars) => 'MARIMOHUB_APP_JOBS' in vars)).toBe(false);
+		compute.createFromSnapshot.mockClear();
+
+		const link = await expectOk<DeepLink>(
+			await client.request('POST', `${base}/deep-links`, { slug: 'bounds' }),
+		);
+		await expectOk(
+			await client.request('PATCH', `${base}/deep-links/bounds`, {
+				registration_id: link.registration_id,
+				access: { mode: 'public' },
+			}),
+		);
+		await expectOk(
+			await client.app.request('/api/public/v1/visits', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ slug: 'bounds' }),
+			}),
+		);
+		expect(compute.createFromSnapshot).not.toHaveBeenCalled();
+		expect(create).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({
+				reuse: false,
+				maxLifetimeMs: Millis.minutes(32),
+				deploymentSecrets: false,
+			}),
+		);
+		expect(fake.calls.setEnvVars).toContainEqual(
+			expect.objectContaining({ MARIMOHUB_APP_JOBS: 'off' }),
+		);
+	});
+
+	// Configuration refuses this pairing, but embedders can still compose it.
 	it('public proxy request carries no x-mhub-app-jobs-credential header', async () => {
 		const { bucket, project, notebook } = await setupProjectAndNotebook();
 		// A signed-in member with jobs enabled would receive a credential on a member app.
@@ -354,8 +381,25 @@ describe('Public app links', () => {
 				body: JSON.stringify({ slug: 'jobs' }),
 			}),
 		);
+		const sandboxPath = new URL(sandbox_url).pathname;
+		expect(
+			await authorizeProxyRequest(
+				new Request(`https://hub.example.com${sandboxPath}`),
+				client.deps,
+			),
+		).toMatchObject({ kind: 'reject' });
+		expect(
+			await authorizeProxyRequest(
+				new Request(
+					`https://hub.example.com${sandboxPath.replace('/proxy/', '/surface-proxy/')}vscode/`,
+					{ headers: { Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${visit_token}` } },
+				),
+				client.deps,
+			),
+		).toMatchObject({ kind: 'reject', status: 403 });
+
 		const request = () =>
-			new Request(`https://hub.example.com${new URL(sandbox_url).pathname}`, {
+			new Request(`https://hub.example.com${sandboxPath}`, {
 				headers: {
 					Cookie: `${PUBLIC_VISIT_COOKIE_NAME}=${visit_token}`,
 					'X-Mhub-App-Jobs-Credential': 'mhub_app_forged',

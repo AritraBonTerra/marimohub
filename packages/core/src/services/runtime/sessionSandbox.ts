@@ -2,6 +2,7 @@ import { NotFoundError } from '../../errors';
 import type { ConnectSandboxOptions, SandboxInstance, SandboxProvider } from '../../ports/sandbox';
 import type { Session } from '../../schema';
 import { sessionOwner } from './sessionOwner';
+import { sessionAudience } from './sessionState';
 import type { Metrics } from '../../ports/metrics';
 
 export function recordSessionReconnect(
@@ -30,7 +31,9 @@ export function sessionSandbox(
 	path = 'other',
 ): SandboxInstance {
 	if (!session.sandbox_id) throw new NotFoundError('Session has no sandbox');
-	if (session.reconnect_reference && provider.connectExisting) {
+	// A replacement would not carry the public sandbox's lifetime and secret limits.
+	const attachOnly = session.reconnect_reference || sessionAudience(session) === 'public';
+	if (attachOnly && provider.connectExisting) {
 		recordSessionReconnect(session, metrics, path);
 		return provider.connectExisting(session.sandbox_id, sessionConnectOptions(session));
 	}

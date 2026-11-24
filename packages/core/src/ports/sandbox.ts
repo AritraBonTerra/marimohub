@@ -392,6 +392,16 @@ export interface CreateSandboxOptions {
 	 */
 	sessionIdleTimeoutMs?: Millis;
 	/**
+	 * Provider-enforced lifetime for this sandbox, so it ends even if the control
+	 * plane never reaps it. Only Modal enforces it; other adapters may ignore it.
+	 */
+	maxLifetimeMs?: Millis;
+	/**
+	 * False withholds secrets the adapter injects deployment-wide. Default true.
+	 * Only Modal has such secrets; other adapters may ignore it.
+	 */
+	deploymentSecrets?: boolean;
+	/**
 	 * Who the sandbox is for, on every call where the caller holds a session
 	 * record. Absent where it holds only an id (orphan reconciliation), so an
 	 * adapter that keys on it must remember what it learned or look it up.

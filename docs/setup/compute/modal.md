@@ -73,8 +73,8 @@ and data transfer.
 
 `MARIMOHUB_COMPUTE_MODAL_SECRETS` accepts comma-separated
 [Modal secret names](https://modal.com/docs/guide/secrets), not secret values.
-Every new editor, app, and job sandbox receives them as environment variables
-across the deployment.
+Every new editor, member app, and job sandbox receives them as environment variables
+across the deployment. [Public app](/apps#public-app-links) sandboxes never receive them.
 The secrets must exist in `MARIMOHUB_COMPUTE_MODAL_ENVIRONMENT`, or the workspace
 default when unset. An empty or unset list adds none.
 
@@ -84,7 +84,7 @@ resolves each secret, so it reports a misspelled name at startup. Existing
 sandboxes retain their secrets.
 
 ::: warning Deployment-wide secrets
-marimohub injects these secrets into every editor, app, and job sandbox in every
+marimohub injects these secrets into every editor, member app, and job sandbox in every
 project. Any notebook author can read the values. For credentials that belong to
 one project, use project integration secret references instead. Secret keys must avoid
 [hub-reserved names](/environment-and-access#sandbox-environment). A `MARIMO_*` value
