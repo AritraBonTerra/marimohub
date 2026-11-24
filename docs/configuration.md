@@ -366,7 +366,7 @@ _No environment variables to set here._
 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
-| `MARIMOHUB_SANDBOX_AUTH` | Enable native marimo token authentication for new editor and app sessions: `on` or `off`. Public app sessions always use it. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements. | — | `off` | `on` |
+| `MARIMOHUB_SANDBOX_AUTH` | Enable native marimo token authentication for new editor and app sessions: `on` or `off`. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements. | — | `off` | `on` |
 
 ## Sandbox exposure
 

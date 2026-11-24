@@ -176,9 +176,9 @@ Key isolation guarantees:
   invalidates the public grant and terminates running public sandboxes.
   Disabling public access works even if `MARIMOHUB_PUBLIC_APP_LINKS` is turned
   back off.
-- **Bounded sandboxes.** Every public sandbox requires a per-session kernel
-  token, whatever `MARIMOHUB_SANDBOX_AUTH` says, and never starts from an
-  editor's filesystem snapshot. On Modal, the provider stops the sandbox 2 minutes
+- **Bounded sandboxes.** A public sandbox never starts from an editor's
+  filesystem snapshot. Anyone who copies its kernel URL can use it until the
+  sandbox stops. On Modal, the provider stops the sandbox 2 minutes
   after `MARIMOHUB_PUBLIC_APPS_MAX_LIFETIME_SECONDS` (30 minutes by default) even
   if the hub is down, and the sandbox gets none of
   `MARIMOHUB_COMPUTE_MODAL_SECRETS`. Other compute backends rely on the hub to

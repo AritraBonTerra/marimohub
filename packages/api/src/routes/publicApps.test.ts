@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	createServices,
 	DEFAULT_APP_POOL_POLICY,
-	KERNEL_AUTH_TOKEN_PATTERN,
 	Millis,
 	ProxyExposure,
 	sessionAudience,
@@ -215,14 +214,7 @@ describe('Public app links', () => {
 		expect(visitBody.data.visit_token.startsWith('v1.')).toBe(true);
 		expect(startRes.headers.get('set-cookie')).toBeNull();
 
-		// The tunnel URL carries a kernel token although this deployment leaves sandbox auth off.
-		expect(anon.deps.sandbox.auth).not.toBe('on');
-		const [stored] = await services.sessions.listActivePublicApps();
-		expect(stored.kernel_auth_token).toMatch(KERNEL_AUTH_TOKEN_PATTERN);
-		expect(stored.sandbox_origin_url).toBeUndefined();
-		const sandboxUrl = new URL(visitBody.data.sandbox_url!);
-		expect(sandboxUrl.host).not.toBe('hub.example.com');
-		expect(sandboxUrl.searchParams.get('access_token')).toBe(stored.kernel_auth_token);
+		expect(new URL(visitBody.data.sandbox_url!).host).not.toBe('hub.example.com');
 
 		// Visit token MUST NOT grant access to any authenticated `/api/v1/*` route.
 		const meRes = await anon.app.request('/api/v1/me', {

@@ -2246,8 +2246,7 @@ async function startNotebookSessionOnce(
 	let bootedSandbox: ReturnType<SandboxProvisioner['boot']> | undefined;
 	let workspacePrefetch: ReturnType<SandboxProvisioner['prefetchWorkspace']> | undefined;
 	let publicationReady = mode !== 'edit' || ephemeral || notebook.source.type !== 'local';
-	const kernelAuthToken =
-		publicAccess || sandbox.auth === 'on' ? createKernelAuthToken() : undefined;
+	const kernelAuthToken = sandbox.auth === 'on' ? createKernelAuthToken() : undefined;
 
 	const progressStore = durableStartup(
 		(progress) => sessions.recordStartupProgress(pid, sessionId, progress),

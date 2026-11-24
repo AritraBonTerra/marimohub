@@ -1343,7 +1343,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_SANDBOX_AUTH',
 						name: 'Sandbox authentication',
 						description:
-							'Enable native marimo token authentication for new editor and app sessions: `on` or `off`. Public app sessions always use it. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements.',
+							'Enable native marimo token authentication for new editor and app sessions: `on` or `off`. See [Native kernel authentication](./security.md#native-kernel-authentication) for deployment requirements.',
 						default: 'off',
 						example: 'on',
 					},

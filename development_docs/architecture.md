@@ -284,8 +284,7 @@ proxy authorizes every HTTP request and WebSocket upgrade in `proxy` exposure
 cached; only editor admissions reuse the five-second cache described in
 [Metadata reads](#metadata-reads). In `subdomain`
 exposure, [native kernel authentication](../docs/security.md#native-kernel-authentication)
-is optional (`MARIMOHUB_SANDBOX_AUTH=on`, default `off`), except for public app
-sessions, which always use it. Session read projections
+is optional (`MARIMOHUB_SANDBOX_AUTH=on`, default `off`). Session read projections
 (list/get) withhold `sandbox_url` from callers the kernel gates would reject.
 The UI says so rather than dangling an unopenable indicator. The reason is
 credential exposure: app sandboxes keep WIF credentials and integration

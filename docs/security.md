@@ -92,7 +92,7 @@ that authenticates only `/api/app-jobs/v1` and does not expose the visitor's ide
 ## Native kernel authentication
 
 `MARIMOHUB_SANDBOX_AUTH` controls native marimo authentication for new editor and
-app sessions. [Public app](./apps.md#public-app-links) sessions always use `on`:
+app sessions:
 
 | Value           | Behavior                                                                                                          |
 | --------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -120,7 +120,7 @@ cross-origin load failures.
 
 ### Partitioned kernel cookies
 
-Partitioned cookies apply to `subdomain` sessions that have a kernel token.
+Partitioned cookies apply to `subdomain` sessions with `MARIMOHUB_SANDBOX_AUTH=on`.
 Proxy mode, tokenless sessions, and jobs do not use them.
 
 The kernel domain is usually a different site from the Hub. The browser then
